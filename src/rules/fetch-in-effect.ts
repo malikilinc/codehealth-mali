@@ -11,9 +11,10 @@ const rule: Rule = {
   id: 'fetch-in-effect',
   severity: 'error',
   category: 'correctness',
-  frameworks: ['react', 'next', 'react-native', 'expo'],
+  frameworks: ['react', 'next', 'react-native', 'expo', 'astro'],
 
   check(ast, filePath, sourceLines): Diagnostic[] {
+    if (filePath.endsWith('.astro')) return [];
     const diagnostics: Diagnostic[] = [];
 
     traverse(ast, (node) => {

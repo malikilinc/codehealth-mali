@@ -3,15 +3,27 @@ import * as path from 'path';
 import { parseFile, isParseFailure } from './parser';
 import { allRules, ruleMap } from './rules';
 import { getRulesForFramework } from './profiles';
-import type { Diagnostic, Framework } from './rules/types';
+import type { Diagnostic, Framework, RuleContext } from './rules/types';
+import { detectProjectContext, type AstroVersion } from './project-detector';
 import { getCodeSnippet } from './component-detector';
 
-const GLOB_PATTERNS = ['**/*.tsx', '**/*.ts', '**/*.jsx', '**/*.js'];
+const BASE_GLOB_PATTERNS = ['**/*.tsx', '**/*.ts', '**/*.jsx', '**/*.js'];
+const ASTRO_GLOB_PATTERNS = [
+  '**/*.astro',
+  '**/*.tsx',
+  '**/*.ts',
+  '**/*.jsx',
+  '**/*.js',
+  '**/astro.config.mjs',
+  '**/astro.config.mts',
+  '**/astro.config.cjs',
+];
 const IGNORE_PATTERNS = [
   '**/node_modules/**',
   '**/dist/**',
   '**/build/**',
   '**/.next/**',
+  '**/.astro/**',
   '**/coverage/**',
   '**/*.test.*',
   '**/*.spec.*',
@@ -21,6 +33,7 @@ const IGNORE_PATTERNS = [
 export interface ScanOptions {
   targetPath: string;
   framework?: Framework;
+  astroVersion?: AstroVersion;
   ruleId?: string;
   ignore?: string[];
 }
@@ -29,6 +42,7 @@ export interface ScanResult {
   diagnostics: Diagnostic[];
   totalFiles: number;
   scannedFiles: string[];
+  astroVersion?: AstroVersion;
 }
 
 function dedup(diagnostics: Diagnostic[]): Diagnostic[] {
@@ -50,17 +64,30 @@ function dedup(diagnostics: Diagnostic[]): Diagnostic[] {
 export async function scan(options: ScanOptions): Promise<ScanResult> {
   const { targetPath, framework, ruleId, ignore = [] } = options;
 
+  const projectCtx = detectProjectContext(targetPath, options.astroVersion);
+  const effectiveAstroVersion = options.astroVersion ?? projectCtx.astroVersion;
+  const includeAstroFiles =
+    framework === 'astro' ||
+    (!framework && projectCtx.detectedFramework === 'astro') ||
+    Boolean(ruleId && ruleId.startsWith('astro-'));
+
   const rules = ruleId
-    ? [ruleMap.get(ruleId)].filter(Boolean) as typeof allRules
+    ? ([ruleMap.get(ruleId)].filter(Boolean) as typeof allRules)
     : getRulesForFramework(framework);
 
-  const files = await fg(GLOB_PATTERNS, {
+  const globPatterns = includeAstroFiles ? ASTRO_GLOB_PATTERNS : BASE_GLOB_PATTERNS;
+
+  const files = await fg(globPatterns, {
     cwd: path.resolve(targetPath),
     absolute: true,
     ignore: [...IGNORE_PATTERNS, ...ignore],
   });
 
   const diagnostics: Diagnostic[] = [];
+  const ruleContext: RuleContext = {
+    framework,
+    astroVersion: effectiveAstroVersion,
+  };
 
   for (const filePath of files) {
     const result = parseFile(filePath);
@@ -88,7 +115,7 @@ export async function scan(options: ScanOptions): Promise<ScanResult> {
     const { ast, sourceLines } = result;
 
     for (const rule of rules) {
-      const ruleDiagnostics = rule.check(ast, filePath, sourceLines);
+      const ruleDiagnostics = rule.check(ast, filePath, sourceLines, ruleContext);
       diagnostics.push(...ruleDiagnostics);
     }
   }
@@ -97,16 +124,18 @@ export async function scan(options: ScanOptions): Promise<ScanResult> {
     diagnostics: dedup(diagnostics),
     totalFiles: files.length,
     scannedFiles: files,
+    astroVersion: framework === 'astro' ? effectiveAstroVersion : undefined,
   };
 }
 
 export async function scanFile(
   filePath: string,
   framework?: Framework,
-  ruleId?: string
+  ruleId?: string,
+  astroVersion?: AstroVersion
 ): Promise<Diagnostic[]> {
   const rules = ruleId
-    ? [ruleMap.get(ruleId)].filter(Boolean) as typeof allRules
+    ? ([ruleMap.get(ruleId)].filter(Boolean) as typeof allRules)
     : getRulesForFramework(framework);
 
   const result = parseFile(filePath);
@@ -132,9 +161,13 @@ export async function scanFile(
 
   const { ast, sourceLines } = result;
   const diagnostics: Diagnostic[] = [];
+  const ruleContext: RuleContext = {
+    framework,
+    astroVersion: astroVersion ?? 7,
+  };
 
   for (const rule of rules) {
-    diagnostics.push(...rule.check(ast, filePath, sourceLines));
+    diagnostics.push(...rule.check(ast, filePath, sourceLines, ruleContext));
   }
 
   return dedup(diagnostics);

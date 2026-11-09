@@ -1,6 +1,8 @@
 import { parse, simpleTraverse } from '@typescript-eslint/typescript-estree';
 import type { TSESTree } from '@typescript-eslint/typescript-estree';
 import * as fs from 'fs';
+import * as path from 'path';
+import { parseAstroSource } from './astro-parser';
 
 export interface ParseResult {
   ast: TSESTree.Program;
@@ -24,13 +26,21 @@ export function parseFile(filePath: string): ParseResult | ParseFailure | null {
     const source = fs.readFileSync(filePath, 'utf-8');
     const sourceLines = source.split('\n');
 
-    const ast = parse(source, {
-      jsx: true,
-      loc: true,
-      range: true,
-      comment: false,
-      tokens: false,
-    });
+    let ast: TSESTree.Program;
+    if (filePath.endsWith('.astro')) {
+      ast = parseAstroSource(source);
+      const base = path.basename(filePath, '.astro');
+      (ast as TSESTree.Program & { __componentName?: string }).__componentName =
+        base ? `${base}.astro` : 'AstroComponent';
+    } else {
+      ast = parse(source, {
+        jsx: true,
+        loc: true,
+        range: true,
+        comment: false,
+        tokens: false,
+      });
+    }
 
     addParentRefs(ast);
 

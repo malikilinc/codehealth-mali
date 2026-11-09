@@ -59,7 +59,7 @@ const rule: Rule = {
   id: 'large-component',
   severity: 'warning',
   category: 'performance',
-  frameworks: ['react', 'next', 'react-native', 'expo'],
+  frameworks: ['react', 'next', 'react-native', 'expo', 'astro'],
 
   check(ast, filePath, sourceLines): Diagnostic[] {
     const diagnostics: Diagnostic[] = [];

@@ -7,19 +7,22 @@ import { startWatch } from './watcher';
 import { ruleMap } from './rules';
 import { getRulesForFramework, FRAMEWORK_LABELS } from './profiles';
 import { promptFramework, promptNextAction } from './prompt';
+import { detectProjectContext, parseAstroVersion } from './project-detector';
 import type { Diagnostic, Framework } from './rules/types';
 
 const program = new Command();
 
 program
-  .name('codehealth')
-  .description('React code scanner with framework-aware diagnostics and fix snippets')
-  .version('1.0.0')
+  .name('codehealth-mali')
+  .description('Framework-aware React & Astro code scanner with diagnostics and fix snippets')
+  .version('1.2.0')
   .argument('[path]', 'Path to scan (directory or file)', '.')
   .option('--react',         'Scan as a React project (CRA, Vite, etc.)')
   .option('--next',          'Scan as a Next.js project (App Router / Pages)')
   .option('--react-native',  'Scan as a React Native project')
   .option('--expo',          'Scan as an Expo project')
+  .option('--astro',         'Scan as an Astro project (.astro + React islands)')
+  .option('--astro-version <version>', 'Target Astro major version (5, 6, or 7)')
   .option('-w, --watch',     'Watch mode — re-scan on file changes')
   .option('-r, --rule <ruleId>', 'Run only a specific rule')
   .option('--ignore <pattern>', 'Glob pattern to ignore (can be repeated)', collect, [])
@@ -32,6 +35,8 @@ program
     next?: boolean;
     reactNative?: boolean;
     expo?: boolean;
+    astro?: boolean;
+    astroVersion?: string;
     watch?: boolean;
     rule?: string;
     ignore: string[];
@@ -45,17 +50,20 @@ program
     else if (options.next)   framework = 'next';
     else if (options.reactNative) framework = 'react-native';
     else if (options.expo)   framework = 'expo';
+    else if (options.astro)  framework = 'astro';
+
+    const astroVersionOverride = parseAstroVersion(options.astroVersion);
 
     if (options.listRules) {
       const rules = getRulesForFramework(framework);
       const header = framework
         ? `Rules for ${FRAMEWORK_LABELS[framework]}:`
-        : 'All available rules (use --react / --next / --react-native / --expo to filter):';
+        : 'All available rules (use --react / --next / --react-native / --expo / --astro to filter):';
       console.log(`\n${header}\n`);
       for (const rule of rules) {
         const icon = rule.severity === 'error' ? '✗' : '⚠';
         const fws = rule.frameworks.join(', ');
-        console.log(`  ${icon} ${rule.id.padEnd(28)} [${rule.severity.padEnd(7)}]  [${rule.category.padEnd(14)}]  ${fws}`);
+        console.log(`  ${icon} ${rule.id.padEnd(36)} [${rule.severity.padEnd(7)}]  [${rule.category.padEnd(14)}]  ${fws}`);
       }
       console.log('');
       process.exit(0);
@@ -67,15 +75,17 @@ program
       process.exit(1);
     }
 
-    if (!framework && !options.rule) {
-      framework = await promptFramework();
-    }
-
     const resolvedPath = path.resolve(process.cwd(), targetPath);
+    const projectCtx = detectProjectContext(resolvedPath, astroVersionOverride);
+
+    if (!framework && !options.rule) {
+      framework = await promptFramework(projectCtx);
+    }
 
     const { diagnostics, totalFiles } = await scan({
       targetPath: resolvedPath,
       framework,
+      astroVersion: projectCtx.astroVersion,
       ruleId: options.rule,
       ignore: options.ignore,
     });
@@ -135,6 +145,7 @@ program
       startWatch({
         targetPath: resolvedPath,
         framework,
+        astroVersion: projectCtx.astroVersion,
         ruleId: options.rule,
         ignore: options.ignore,
         allDiagnostics: diagMap,

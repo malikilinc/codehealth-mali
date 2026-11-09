@@ -34,7 +34,7 @@ const rule: Rule = {
   id: 'a11y-role',
   severity: 'warning',
   category: 'accessibility',
-  frameworks: ['react', 'next'],
+  frameworks: ['react', 'next', 'astro'],
 
   check(ast, filePath, sourceLines): Diagnostic[] {
     const diagnostics: Diagnostic[] = [];

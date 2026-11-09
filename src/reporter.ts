@@ -90,9 +90,18 @@ const RULE_SUMMARY: Record<string, string> = {
   'no-console-log':     'console statement in production code — remove or use a logger',
   'flatlist-for-lists': '.map() inside ScrollView — use FlatList for virtualization',
   'rn-accessibility':   'No accessibilityLabel — screen readers cannot identify this element',
+  'astro-v7-breaking':  'Removed or deprecated Astro 6/7 API — update to Astro v7 syntax',
+  'astro-legacy-content-config': 'Legacy Content Collections config — migrate to src/content.config.ts with loader',
+  'astro-client-directive-on-html': 'client:* directive on native HTML element — use a UI component or <script>',
+  'astro-client-only-missing-framework': 'client:only missing framework hint (e.g. client:only="react")',
+  'astro-hooks-in-astro': 'React hook called inside .astro file — move to a .tsx/.jsx island',
+  'astro-client-load-overuse': 'client:load hydrates immediately — prefer client:visible or client:idle',
+  'astro-unsafe-set-html': 'Dynamic set:html expression — sanitize HTML to prevent XSS',
+  'astro-inline-script': '<script is:inline> opts out of Astro bundling and deduplication',
 };
 
 function normalizeMessage(ruleId: string, fallback: string): string {
+  if (ruleId === 'img-not-optimized' && fallback) return fallback;
   return RULE_SUMMARY[ruleId] ?? fallback;
 }
 

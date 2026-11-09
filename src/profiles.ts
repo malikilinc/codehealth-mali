@@ -7,6 +7,7 @@ export const FRAMEWORK_LABELS: Record<Framework, string> = {
   next:           'Next.js',
   'react-native': 'React Native',
   expo:           'Expo',
+  astro:          'Astro',
 };
 
 export const FRAMEWORK_DESCRIPTIONS: Record<Framework, string> = {
@@ -14,6 +15,7 @@ export const FRAMEWORK_DESCRIPTIONS: Record<Framework, string> = {
   next:           'App Router / Pages Router',
   'react-native': 'Bare workflow',
   expo:           'Managed / Bare workflow',
+  astro:          'Islands, Content Layer, SSR / SSG (v5–v7)',
 };
 
 export function getRulesForFramework(framework: Framework | undefined): Rule[] {

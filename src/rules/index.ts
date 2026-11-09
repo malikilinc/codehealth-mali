@@ -24,6 +24,15 @@ import rnAccessibility from './rn-accessibility';
 
 import constantsManifest from './constants-manifest';
 
+import astroV7Breaking from './astro-v7-breaking';
+import astroLegacyContentConfig from './astro-legacy-content-config';
+import astroClientDirectiveOnHtml from './astro-client-directive-on-html';
+import astroClientOnlyMissingFramework from './astro-client-only-missing-framework';
+import astroHooksInAstro from './astro-hooks-in-astro';
+import astroClientLoadOveruse from './astro-client-load-overuse';
+import astroUnsafeSetHtml from './astro-unsafe-set-html';
+import astroInlineScript from './astro-inline-script';
+
 export const allRules: Rule[] = [
   fetchInEffect,
   multipleUsestate,
@@ -44,10 +53,18 @@ export const allRules: Rule[] = [
   flatlistForLists,
   rnAccessibility,
   constantsManifest,
+  astroV7Breaking,
+  astroLegacyContentConfig,
+  astroClientDirectiveOnHtml,
+  astroClientOnlyMissingFramework,
+  astroHooksInAstro,
+  astroClientLoadOveruse,
+  astroUnsafeSetHtml,
+  astroInlineScript,
 ];
 
 export const ruleMap = new Map<string, Rule>(
   allRules.map((r) => [r.id, r])
 );
 
-export { type Rule, type Diagnostic, type Framework } from './types';
+export { type Rule, type Diagnostic, type Framework, type RuleContext } from './types';

@@ -7,9 +7,10 @@ const rule: Rule = {
   id: 'index-as-key',
   severity: 'warning',
   category: 'best-practice',
-  frameworks: ['react', 'next', 'react-native', 'expo'],
+  frameworks: ['react', 'next', 'react-native', 'expo', 'astro'],
 
   check(ast, filePath, sourceLines): Diagnostic[] {
+    if (filePath.endsWith('.astro')) return [];
     const diagnostics: Diagnostic[] = [];
 
     traverse(ast, (node) => {

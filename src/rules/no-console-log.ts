@@ -26,10 +26,11 @@ const rule: Rule = {
   id: 'no-console-log',
   severity: 'warning',
   category: 'best-practice',
-  frameworks: ['react-native', 'expo'],
+  frameworks: ['react-native', 'expo', 'astro'],
 
-  check(ast, filePath, sourceLines): Diagnostic[] {
+  check(ast, filePath, sourceLines, context): Diagnostic[] {
     const diagnostics: Diagnostic[] = [];
+    const isAstro = context?.framework === 'astro' || filePath.endsWith('.astro');
 
     traverse(ast, (node) => {
       if (
@@ -59,7 +60,14 @@ const rule: Rule = {
         line,
         column,
         codeSnippet: getCodeSnippet(sourceLines, line),
-        fix: `// Option 1: Remove the console statement entirely
+        fix: isAstro
+          ? `// Option 1: Remove the console statement entirely
+
+// Option 2: Guard with Vite/Astro import.meta.env.DEV:
+if (import.meta.env.DEV) {
+  console.${method}('debug info');
+}`
+          : `// Option 1: Remove the console statement entirely
 
 // Option 2: Use __DEV__ guard (React Native built-in):
 if (__DEV__) {
@@ -69,9 +77,13 @@ if (__DEV__) {
 // Option 3: Use a logger library like react-native-logs:
 import { logger } from './logger';
 logger.${method === 'log' ? 'debug' : method}('message');`,
-        suggestions: [
-          'console statements are stripped in release builds by Metro, but leaving them adds noise',
-        ],
+        suggestions: isAstro
+          ? [
+              'Wrap debug logs in if (import.meta.env.DEV) so Vite tree-shakes them out of production builds',
+            ]
+          : [
+              'console statements are stripped in release builds by Metro, but leaving them adds noise',
+            ],
       });
     });
 

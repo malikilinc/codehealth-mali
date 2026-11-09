@@ -2,6 +2,7 @@ import * as readline from 'readline';
 import pc from 'picocolors';
 import type { Framework } from './rules/types';
 import { FRAMEWORK_LABELS, FRAMEWORK_DESCRIPTIONS } from './profiles';
+import type { ProjectContext } from './project-detector';
 
 type NextAction = 'overview' | 'fixes' | 'ai-prompt' | 'skip';
 
@@ -74,16 +75,20 @@ export async function promptNextAction(): Promise<NextAction> {
   });
 }
 
-const FRAMEWORKS: Framework[] = ['react', 'next', 'react-native', 'expo'];
+const FRAMEWORKS: Framework[] = ['react', 'next', 'react-native', 'expo', 'astro'];
 
-export async function promptFramework(): Promise<Framework> {
-  let selected = 0;
+export async function promptFramework(projectCtx?: ProjectContext): Promise<Framework> {
+  const detected = projectCtx?.detectedFramework;
+  let selected = detected ? Math.max(0, FRAMEWORKS.indexOf(detected)) : 0;
 
   const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 
   if (!isTTY) {
+    if (detected) {
+      return detected;
+    }
     console.error(
-      'No framework specified. Use --react, --next, --react-native, or --expo.'
+      'No framework specified. Use --react, --next, --react-native, --expo, or --astro.'
     );
     process.exit(1);
   }
@@ -96,12 +101,19 @@ export async function promptFramework(): Promise<Framework> {
     for (let i = 0; i < FRAMEWORKS.length; i++) {
       const fw = FRAMEWORKS[i];
       const isActive = i === selected;
+      const isDetected = fw === detected;
       const cursor = isActive ? pc.cyan('❯') : ' ';
+      const baseLabel = FRAMEWORK_LABELS[fw];
       const label = isActive
-        ? pc.cyan(pc.bold(FRAMEWORK_LABELS[fw]))
-        : FRAMEWORK_LABELS[fw];
+        ? pc.cyan(pc.bold(baseLabel))
+        : baseLabel;
+      const detectedBadge = isDetected
+        ? fw === 'astro' && projectCtx?.astroVersionDetected
+          ? pc.green(` (detected · v${projectCtx.astroVersion})`)
+          : pc.green(' (detected)')
+        : '';
       const desc = pc.dim(FRAMEWORK_DESCRIPTIONS[fw]);
-      process.stdout.write(`  ${cursor} ${label.padEnd(isActive ? 22 : 14)}  ${desc}\n`);
+      process.stdout.write(`  ${cursor} ${label.padEnd(isActive ? 22 : 14)}  ${desc}${detectedBadge}\n`);
     }
   }
 

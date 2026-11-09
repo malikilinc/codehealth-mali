@@ -1,6 +1,10 @@
 # codehealth
 
-A fast, framework-aware React code scanner that tells you **exactly which component, on which line** has a problem — and gives you a **copy-paste ready fix** for every issue found.
+> [!NOTE]
+> **Geliştirme ve Test Forku Bilgilendirmesi:**
+> Bu proje, **Esra Nur Mülkpınar** tarafından geliştirilen [**EsraMulkpinar/codehealth**](https://github.com/EsraMulkpinar/codehealth) projesine **Astro (v5 / v6 / v7.4+)** desteği kazandırmak amacıyla oluşturulmuş geliştirme ve test deposudur. Geliştirme ve saha testleri tamamlandığında tüm Astro özelliklerinin asıl (upstream) projeye Pull Request ile dahil edilmesi hedeflenmektedir.
+
+A fast, framework-aware React & Astro code scanner that tells you **exactly which component, on which line** has a problem — and gives you a **copy-paste ready fix** for every issue found.
 
 Works completely standalone. No ESLint dependency. No config files needed.
 
@@ -33,7 +37,14 @@ npm install -g codehealth
 Or run without installing:
 
 ```bash
-npx codehealth .
+npx codehealth-mali .
+```
+
+Or run directly from GitHub on any project:
+
+```bash
+npx github:malikilinc/codehealth-mali .
+npx github:malikilinc/codehealth-mali . --astro
 ```
 
 ---
@@ -47,11 +58,13 @@ codehealth <path> [framework] [options]
 If you don't pass a framework flag, an interactive prompt lets you pick one with arrow keys.
 
 ```bash
-codehealth .                     # interactive framework selector
+codehealth .                     # interactive framework selector (auto-detects project framework)
 codehealth . --react             # React (CRA, Vite, etc.)
 codehealth . --next              # Next.js (App Router / Pages Router)
 codehealth . --react-native      # React Native (bare workflow)
 codehealth . --expo              # Expo (managed / bare)
+codehealth . --astro             # Astro (v5, v6, v7+ islands, frontmatter, template & config)
+codehealth . --astro --astro-version 6
 ```
 
 ### Options
@@ -62,6 +75,8 @@ codehealth . --expo              # Expo (managed / bare)
 | `--next` | Use the Next.js rule profile |
 | `--react-native` | Use the React Native rule profile |
 | `--expo` | Use the Expo rule profile |
+| `--astro` | Use the Astro rule profile (`.astro` + React islands) |
+| `--astro-version <5\|6\|7>` | Override detected Astro major version (`5`, `6`, or `7`) |
 | `-w, --watch` | Re-scan on every file save |
 | `-r, --rule <id>` | Run only a single rule |
 | `--ignore <pattern>` | Glob pattern to exclude (repeatable) |
@@ -153,6 +168,22 @@ Everything in `--react-native`, plus Expo specific rules.
 | Rule | Severity | Description |
 |------|----------|-------------|
 | `constants-manifest` | **error** | `Constants.manifest` is deprecated — use `Constants.expoConfig` |
+
+### `--astro`
+Scans `.astro` files (Frontmatter, Template, and `<script>` blocks), `astro.config.*`, Content Layer config, and `.tsx`/`.jsx` React islands. Automatically detects Astro v5, v6, or v7+ from `package.json` (or via `--astro-version`) and adapts rule severities.
+
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `astro-v7-breaking` | **error** / warning | Removed/deprecated Astro 6 & 7 APIs (`Astro.glob()`, `<ViewTransitions />`, `astro:db`, promoted `experimental.*` flags) |
+| `astro-legacy-content-config` | **error** / warning | Legacy `src/content/config.ts` path or `defineCollection()` without Content Layer `loader` |
+| `astro-client-directive-on-html` | **error** | `client:*` directive placed on a native HTML element (`<div client:load>`) |
+| `astro-client-only-missing-framework` | **error** | `client:only` used without specifying the framework (`client:only="react"`) |
+| `astro-hooks-in-astro` | **error** | React hook (`useState`, `useEffect`, etc.) called directly inside an `.astro` file |
+| `astro-client-load-overuse` | warning | `client:load` on island components — prefer `client:visible` or `client:idle` |
+| `astro-unsafe-set-html` | warning | Dynamic expression passed to `set:html={...}` — sanitize HTML to prevent XSS |
+| `astro-inline-script` | warning | `<script is:inline>` disables Astro bundling, minification, and deduplication |
+| `img-not-optimized` | warning | Raw `<img>` tag — use `<Image />` from `astro:assets` |
+| + React & Web rules | error / warning | Web accessibility (`a11y-*`), `heavy-import`, `no-console-log` on `.astro` & `.tsx`, plus React hook/key rules on `.tsx`/`.jsx` islands |
 
 ---
 

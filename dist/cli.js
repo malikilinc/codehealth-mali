@@ -25,15 +25,300 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 
 // src/cli.ts
 var import_commander = require("commander");
-var path3 = __toESM(require("path"));
+var path5 = __toESM(require("path"));
 
 // src/scanner.ts
 var import_fast_glob = __toESM(require("fast-glob"));
-var path = __toESM(require("path"));
+var path3 = __toESM(require("path"));
 
 // src/parser.ts
-var import_typescript_estree = require("@typescript-eslint/typescript-estree");
+var import_typescript_estree2 = require("@typescript-eslint/typescript-estree");
 var fs = __toESM(require("fs"));
+var path = __toESM(require("path"));
+
+// src/astro-parser.ts
+var import_typescript_estree = require("@typescript-eslint/typescript-estree");
+var VOID_TAGS = /* @__PURE__ */ new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr"
+]);
+function maskPreservingNewlines(text) {
+  return text.replace(/[^\n]/g, " ");
+}
+function normalizeVoidTagsAndShorthands(template) {
+  const voidTagRegex = /<([a-zA-Z][a-zA-Z0-9:-]*)\b/g;
+  let result = "";
+  let lastIndex = 0;
+  let match;
+  while ((match = voidTagRegex.exec(template)) !== null) {
+    const tagStart = match.index;
+    const tagName = match[1].toLowerCase();
+    let i = tagStart + match[0].length;
+    let braceDepth = 0;
+    let quote = null;
+    let tagEnd = -1;
+    while (i < template.length) {
+      const ch = template[i];
+      if (quote) {
+        if (ch === "\\") {
+          i += 2;
+          continue;
+        }
+        if (ch === quote) quote = null;
+      } else {
+        if (ch === '"' || ch === "'" || ch === "`") {
+          quote = ch;
+        } else if (ch === "{") {
+          braceDepth++;
+        } else if (ch === "}") {
+          if (braceDepth > 0) braceDepth--;
+        } else if (ch === ">" && braceDepth === 0) {
+          tagEnd = i;
+          break;
+        }
+      }
+      i++;
+    }
+    if (tagEnd === -1) continue;
+    result += template.slice(lastIndex, tagStart);
+    let rawTag = template.slice(tagStart, tagEnd + 1);
+    rawTag = rawTag.replace(
+      /(\s)\{\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\}(?=[\s/>])/g,
+      "$1$2={$2}"
+    );
+    if (VOID_TAGS.has(tagName) && !rawTag.endsWith("/>")) {
+      rawTag = rawTag.slice(0, -1) + "/>";
+    }
+    result += rawTag;
+    lastIndex = tagEnd + 1;
+    voidTagRegex.lastIndex = lastIndex;
+  }
+  result += template.slice(lastIndex);
+  return result;
+}
+function extractAstroZones(source) {
+  const lines = source.split("\n");
+  let frontmatterStartLine = -1;
+  let frontmatterEndLine = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].replace(/^\uFEFF/, "").trim();
+    if (trimmed === "") continue;
+    if (/^---+$/.test(trimmed)) {
+      frontmatterStartLine = i;
+    }
+    break;
+  }
+  if (frontmatterStartLine !== -1) {
+    for (let i = frontmatterStartLine + 1; i < lines.length; i++) {
+      if (/^---+\s*$/.test(lines[i])) {
+        frontmatterEndLine = i;
+        break;
+      }
+    }
+  }
+  let frontmatterSource = null;
+  if (frontmatterStartLine !== -1 && frontmatterEndLine !== -1) {
+    const fmLines = lines.map((line, idx) => {
+      if (idx > frontmatterStartLine && idx < frontmatterEndLine) {
+        return line;
+      }
+      return "";
+    });
+    frontmatterSource = fmLines.join("\n");
+  }
+  const templateLines = lines.map((line, idx) => {
+    if (frontmatterStartLine !== -1 && frontmatterEndLine !== -1 && idx <= frontmatterEndLine) {
+      return "";
+    }
+    return line;
+  });
+  let templateRaw = templateLines.join("\n");
+  const scriptBlocks = [];
+  templateRaw = templateRaw.replace(
+    /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi,
+    (_full, openTag, content, closeTag) => {
+      return openTag + maskPreservingNewlines(content) + closeTag;
+    }
+  );
+  templateRaw = templateRaw.replace(
+    /(<script\b[^>]*>)([\s\S]*?)(<\/script>)/gi,
+    (fullMatch, openTag, content, closeTag, offset) => {
+      const isJsonScript = /\btype\s*=\s*["'](?:application\/(?:ld\+)?json|importmap)["']/i.test(openTag);
+      if (!isJsonScript && content.trim().length > 0) {
+        const prefix = templateRaw.slice(0, offset + openTag.length);
+        const lineOffset = prefix.split("\n").length;
+        const lastNewlineIdx = prefix.lastIndexOf("\n");
+        const colOffset = lastNewlineIdx === -1 ? prefix.length : prefix.length - lastNewlineIdx - 1;
+        const alignedScript = "\n".repeat(Math.max(0, lineOffset - 1)) + " ".repeat(Math.max(0, colOffset)) + content;
+        scriptBlocks.push({
+          source: alignedScript,
+          startLine: lineOffset
+        });
+      }
+      void fullMatch;
+      return openTag + maskPreservingNewlines(content) + closeTag;
+    }
+  );
+  templateRaw = templateRaw.replace(/<!DOCTYPE[^>]*>/gi, (m) => maskPreservingNewlines(m));
+  templateRaw = templateRaw.replace(/<!--[\s\S]*?-->/g, (m) => maskPreservingNewlines(m));
+  const templateSource = normalizeVoidTagsAndShorthands(templateRaw);
+  return {
+    frontmatterSource,
+    frontmatterStartLine,
+    frontmatterEndLine,
+    scriptBlocks,
+    templateSource
+  };
+}
+function parseTypeScriptZone(code, allowTopLevelReturn) {
+  try {
+    return (0, import_typescript_estree.parse)(code, {
+      jsx: true,
+      loc: true,
+      range: true,
+      comment: false,
+      tokens: false
+    });
+  } catch (err) {
+    if (allowTopLevelReturn) {
+      try {
+        const wrapped = `async function __astro_fm__() {${code}
+}`;
+        return (0, import_typescript_estree.parse)(wrapped, {
+          jsx: true,
+          loc: true,
+          range: true,
+          comment: false,
+          tokens: false
+        });
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+function parseTemplateElementsFallback(templateSource) {
+  const statements = [];
+  const tagRegex = /<([a-zA-Z][a-zA-Z0-9:._-]*)\b/g;
+  let match;
+  while ((match = tagRegex.exec(templateSource)) !== null) {
+    const startIdx = match.index;
+    const tagName = match[1];
+    let i = startIdx + match[0].length;
+    let braceDepth = 0;
+    let quote = null;
+    let endIdx = -1;
+    while (i < templateSource.length) {
+      const ch = templateSource[i];
+      if (quote) {
+        if (ch === "\\") {
+          i += 2;
+          continue;
+        }
+        if (ch === quote) quote = null;
+      } else {
+        if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+        else if (ch === "{") braceDepth++;
+        else if (ch === "}") {
+          if (braceDepth > 0) braceDepth--;
+        } else if (ch === ">" && braceDepth === 0) {
+          endIdx = i;
+          break;
+        }
+      }
+      i++;
+    }
+    if (endIdx === -1) continue;
+    const prefix = templateSource.slice(0, startIdx);
+    const lineNum = prefix.split("\n").length;
+    const lastNl = prefix.lastIndexOf("\n");
+    const colNum = lastNl === -1 ? prefix.length : prefix.length - lastNl - 1;
+    let rawOpening = templateSource.slice(startIdx, endIdx + 1);
+    if (!rawOpening.endsWith("/>")) {
+      rawOpening = rawOpening.slice(0, -1) + "/>";
+    } else if (tagName.includes(":")) {
+    }
+    const padded = "\n".repeat(Math.max(0, lineNum - 1)) + " ".repeat(Math.max(0, colNum)) + rawOpening;
+    try {
+      const ast = (0, import_typescript_estree.parse)(padded, {
+        jsx: true,
+        loc: true,
+        range: true,
+        comment: false,
+        tokens: false
+      });
+      statements.push(...ast.body);
+    } catch {
+    }
+    tagRegex.lastIndex = endIdx + 1;
+  }
+  return statements;
+}
+function parseAstroSource(source) {
+  const sourceLines = source.split("\n");
+  const {
+    frontmatterSource,
+    scriptBlocks,
+    templateSource
+  } = extractAstroZones(source);
+  const combinedBody = [];
+  if (frontmatterSource && frontmatterSource.trim().length > 0) {
+    const fmAst = parseTypeScriptZone(frontmatterSource, true);
+    if (fmAst) {
+      combinedBody.push(...fmAst.body);
+    }
+  }
+  if (templateSource.trim().length > 0) {
+    const wrappedTemplate = `<>` + templateSource + `</>`;
+    try {
+      const tplAst = (0, import_typescript_estree.parse)(wrappedTemplate, {
+        jsx: true,
+        loc: true,
+        range: true,
+        comment: false,
+        tokens: false
+      });
+      combinedBody.push(...tplAst.body);
+    } catch {
+      const fallbackStmts = parseTemplateElementsFallback(templateSource);
+      combinedBody.push(...fallbackStmts);
+    }
+  }
+  for (const block of scriptBlocks) {
+    const scriptAst = parseTypeScriptZone(block.source, false);
+    if (scriptAst) {
+      combinedBody.push(...scriptAst.body);
+    }
+  }
+  return {
+    type: import_typescript_estree.AST_NODE_TYPES.Program,
+    body: combinedBody,
+    sourceType: "module",
+    range: [0, source.length],
+    loc: {
+      start: { line: 1, column: 0 },
+      end: {
+        line: sourceLines.length,
+        column: sourceLines[sourceLines.length - 1]?.length ?? 0
+      }
+    }
+  };
+}
+
+// src/parser.ts
 function isParseFailure(result) {
   return result !== null && "parseError" in result;
 }
@@ -41,13 +326,20 @@ function parseFile(filePath) {
   try {
     const source = fs.readFileSync(filePath, "utf-8");
     const sourceLines = source.split("\n");
-    const ast = (0, import_typescript_estree.parse)(source, {
-      jsx: true,
-      loc: true,
-      range: true,
-      comment: false,
-      tokens: false
-    });
+    let ast;
+    if (filePath.endsWith(".astro")) {
+      ast = parseAstroSource(source);
+      const base = path.basename(filePath, ".astro");
+      ast.__componentName = base ? `${base}.astro` : "AstroComponent";
+    } else {
+      ast = (0, import_typescript_estree2.parse)(source, {
+        jsx: true,
+        loc: true,
+        range: true,
+        comment: false,
+        tokens: false
+      });
+    }
     addParentRefs(ast);
     return { ast, sourceLines };
   } catch (err) {
@@ -58,7 +350,7 @@ function parseFile(filePath) {
   }
 }
 function addParentRefs(ast) {
-  (0, import_typescript_estree.simpleTraverse)(ast, {
+  (0, import_typescript_estree2.simpleTraverse)(ast, {
     enter(node, parent) {
       if (parent) {
         node.parent = parent;
@@ -101,6 +393,10 @@ function detectComponent(node) {
         }
         return "DefaultExport";
       }
+    }
+    if (current.type === "Program") {
+      const astroName = current.__componentName;
+      if (astroName) return astroName;
     }
     current = current.parent;
   }
@@ -145,8 +441,9 @@ var rule = {
   id: "fetch-in-effect",
   severity: "error",
   category: "correctness",
-  frameworks: ["react", "next", "react-native", "expo"],
+  frameworks: ["react", "next", "react-native", "expo", "astro"],
   check(ast, filePath, sourceLines) {
+    if (filePath.endsWith(".astro")) return [];
     const diagnostics = [];
     traverse(ast, (node) => {
       if (node.type === "CallExpression" && isUseEffectCall(node)) {
@@ -206,8 +503,9 @@ var rule2 = {
   id: "multiple-usestate",
   severity: "warning",
   category: "best-practice",
-  frameworks: ["react", "next", "react-native", "expo"],
+  frameworks: ["react", "next", "react-native", "expo", "astro"],
   check(ast, filePath, sourceLines) {
+    if (filePath.endsWith(".astro")) return [];
     const diagnostics = [];
     const visited = /* @__PURE__ */ new Set();
     traverse(ast, (node) => {
@@ -310,7 +608,7 @@ var rule3 = {
   id: "large-component",
   severity: "warning",
   category: "performance",
-  frameworks: ["react", "next", "react-native", "expo"],
+  frameworks: ["react", "next", "react-native", "expo", "astro"],
   check(ast, filePath, sourceLines) {
     const diagnostics = [];
     const visited = /* @__PURE__ */ new Set();
@@ -385,8 +683,9 @@ var rule4 = {
   id: "effect-set-state",
   severity: "warning",
   category: "best-practice",
-  frameworks: ["react", "next", "react-native", "expo"],
+  frameworks: ["react", "next", "react-native", "expo", "astro"],
   check(ast, filePath, sourceLines) {
+    if (filePath.endsWith(".astro")) return [];
     const diagnostics = [];
     const setterNames = buildSetterNames(ast);
     function isSetterCall(node) {
@@ -457,8 +756,9 @@ var rule5 = {
   id: "effect-as-handler",
   severity: "warning",
   category: "best-practice",
-  frameworks: ["react", "next", "react-native", "expo"],
+  frameworks: ["react", "next", "react-native", "expo", "astro"],
   check(ast, filePath, sourceLines) {
+    if (filePath.endsWith(".astro")) return [];
     const diagnostics = [];
     traverse(ast, (node) => {
       if (node.type !== "CallExpression" || !isUseEffectCall3(node)) return;
@@ -508,8 +808,9 @@ var rule6 = {
   id: "index-as-key",
   severity: "warning",
   category: "best-practice",
-  frameworks: ["react", "next", "react-native", "expo"],
+  frameworks: ["react", "next", "react-native", "expo", "astro"],
   check(ast, filePath, sourceLines) {
+    if (filePath.endsWith(".astro")) return [];
     const diagnostics = [];
     traverse(ast, (node) => {
       if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression" || node.callee.property.type !== "Identifier" || node.callee.property.name !== "map") return;
@@ -559,11 +860,12 @@ var rule7 = {
   id: "a11y-autofocus",
   severity: "warning",
   category: "accessibility",
-  frameworks: ["react", "next"],
+  frameworks: ["react", "next", "astro"],
   check(ast, filePath, sourceLines) {
     const diagnostics = [];
+    const isAstro = filePath.endsWith(".astro");
     traverse(ast, (node) => {
-      if (node.type !== "JSXAttribute" || node.name.type !== "JSXIdentifier" || node.name.name !== "autoFocus") return;
+      if (node.type !== "JSXAttribute" || node.name.type !== "JSXIdentifier" || node.name.name !== "autoFocus" && node.name.name !== "autofocus") return;
       if (node.value?.type === "JSXExpressionContainer" && node.value.expression.type === "Literal" && node.value.expression.value === false) return;
       const line = node.loc.start.line;
       const column = node.loc.start.column;
@@ -573,13 +875,23 @@ var rule7 = {
         severity: "warning",
         category: "accessibility",
         confidence: 0.85,
-        message: "autoFocus disrupts screen readers and keyboard navigation",
+        message: `${node.name.name} disrupts screen readers and keyboard navigation`,
         component,
         filePath,
         line,
         column,
         codeSnippet: getCodeSnippet(sourceLines, line),
-        fix: `// Remove autoFocus, or focus programmatically after user action:
+        fix: isAstro ? `<!-- Remove autofocus from initial HTML, or focus only when a dialog opens: -->
+<dialog id="my-dialog">
+  <input id="dialog-input" type="text" />
+</dialog>
+
+<script>
+  const dialog = document.getElementById('my-dialog');
+  dialog?.addEventListener('toggle', () => {
+    document.getElementById('dialog-input')?.focus();
+  });
+</script>` : `// Remove autoFocus, or focus programmatically after user action:
 const inputRef = useRef<HTMLInputElement>(null);
 
 useEffect(() => {
@@ -589,7 +901,7 @@ useEffect(() => {
 
 <input ref={inputRef} />`,
         suggestions: [
-          "If focusing inside a modal, use the dialog role and manage focus with useEffect",
+          "If focusing inside a modal, use the dialog role and manage focus after user interaction",
           "WCAG 2.4.3: Focus order must be logical and predictable"
         ]
       });
@@ -620,9 +932,11 @@ var rule8 = {
   id: "a11y-label",
   severity: "warning",
   category: "accessibility",
-  frameworks: ["react", "next"],
+  frameworks: ["react", "next", "astro"],
   check(ast, filePath, sourceLines) {
     const diagnostics = [];
+    const isAstro = filePath.endsWith(".astro");
+    const forAttr = isAstro ? "for" : "htmlFor";
     traverse(ast, (node) => {
       if (node.type !== "JSXOpeningElement") return;
       if (node.name.type !== "JSXIdentifier") return;
@@ -650,7 +964,7 @@ var rule8 = {
 <${name} aria-label="Descriptive label" />
 
 // Option 2: Associate with a <label> element
-<label htmlFor="my-${name}">Label text</label>
+<label ${forAttr}="my-${name}">Label text</label>
 <${name} id="my-${name}" />
 
 // Option 3: Use aria-labelledby
@@ -659,7 +973,7 @@ var rule8 = {
           suggestions: [
             "WCAG 1.3.1: Form elements must have programmatic labels",
             "Placeholder text is not a substitute for a label",
-            'If using id, ensure a <label htmlFor="..."> element is also present'
+            `If using id, ensure a <label ${forAttr}="..."> element is also present`
           ]
         });
       }
@@ -696,7 +1010,7 @@ var rule9 = {
   id: "a11y-interactive",
   severity: "warning",
   category: "accessibility",
-  frameworks: ["react", "next"],
+  frameworks: ["react", "next", "astro"],
   check(ast, filePath, sourceLines) {
     const diagnostics = [];
     traverse(ast, (node) => {
@@ -783,7 +1097,7 @@ var rule10 = {
   id: "a11y-role",
   severity: "warning",
   category: "accessibility",
-  frameworks: ["react", "next"],
+  frameworks: ["react", "next", "astro"],
   check(ast, filePath, sourceLines) {
     const diagnostics = [];
     traverse(ast, (node) => {
@@ -855,9 +1169,10 @@ var rule11 = {
   id: "heavy-import",
   severity: "warning",
   category: "performance",
-  frameworks: ["react", "next"],
-  check(ast, filePath, sourceLines) {
+  frameworks: ["react", "next", "astro"],
+  check(ast, filePath, sourceLines, context) {
     const diagnostics = [];
+    const isAstroFile = filePath.endsWith(".astro") || context?.framework === "astro";
     traverse(ast, (node) => {
       if (node.type === "ImportDeclaration") {
         if (node.importKind === "type") return;
@@ -878,6 +1193,17 @@ const formatted = format(parseISO(dateString), 'yyyy-MM-dd');`;
         } else if (source === "lodash") {
           fix = `// Use tree-shakeable lodash-es:
 import { debounce, groupBy } from 'lodash-es';`;
+        } else if (isAstroFile) {
+          fix = `---
+// Option 1: Hydrate heavy UI only when visible in the viewport:
+import HeavyIsland from '../components/HeavyIsland.tsx';
+---
+<HeavyIsland client:visible />
+
+<!-- Option 2: Dynamically import inside a client <script> when needed: -->
+<script>
+  const module = await import('${source}');
+</script>`;
         } else {
           const varName = source.split("/").pop().replace(/[-@]/g, "_");
           fix = `// Lazy load the heavy module:
@@ -1082,27 +1408,61 @@ var rule14 = {
   id: "img-not-optimized",
   severity: "warning",
   category: "performance",
-  frameworks: ["next"],
-  check(ast, filePath, sourceLines) {
+  frameworks: ["next", "astro"],
+  check(ast, filePath, sourceLines, context) {
     const diagnostics = [];
+    const isAstro = context?.framework === "astro" || filePath.endsWith(".astro");
     traverse(ast, (node) => {
       if (node.type === "JSXOpeningElement" && node.name.type === "JSXIdentifier" && node.name.name === "img") {
         if (!hasSrcAttr(node)) return;
         const line = node.loc.start.line;
         const column = node.loc.start.column;
         const component = detectComponent(node);
-        diagnostics.push({
-          ruleId: "img-not-optimized",
-          severity: "warning",
-          category: "performance",
-          confidence: 0.85,
-          message: "<img> tag used \u2014 use Next.js <Image> for automatic optimization",
-          component,
-          filePath,
-          line,
-          column,
-          codeSnippet: getCodeSnippet(sourceLines, line),
-          fix: `import Image from 'next/image';
+        if (isAstro) {
+          diagnostics.push({
+            ruleId: "img-not-optimized",
+            severity: "warning",
+            category: "performance",
+            confidence: 0.85,
+            message: "<img> tag used \u2014 use Astro <Image /> from astro:assets for automatic optimization",
+            component,
+            filePath,
+            line,
+            column,
+            codeSnippet: getCodeSnippet(sourceLines, line),
+            fix: `---
+import { Image } from 'astro:assets';
+import myImage from '../assets/my-image.png';
+---
+
+<!-- Local asset (width/height inferred automatically): -->
+<Image src={myImage} alt="Descriptive alt text" />
+
+<!-- Remote or public/ image (explicit dimensions required): -->
+<Image
+  src="/your-image.png"
+  alt="Descriptive alt text"
+  width={800}
+  height={600}
+/>`,
+            suggestions: [
+              "Astro <Image /> from astro:assets optimizes formats (AVIF/WebP), resizes, and prevents CLS",
+              "Inside React (.tsx) islands, pass optimized image metadata from Astro frontmatter via getImage()"
+            ]
+          });
+        } else {
+          diagnostics.push({
+            ruleId: "img-not-optimized",
+            severity: "warning",
+            category: "performance",
+            confidence: 0.85,
+            message: "<img> tag used \u2014 use Next.js <Image> for automatic optimization",
+            component,
+            filePath,
+            line,
+            column,
+            codeSnippet: getCodeSnippet(sourceLines, line),
+            fix: `import Image from 'next/image';
 
 // Replace <img> with <Image>:
 <Image
@@ -1116,11 +1476,12 @@ var rule14 = {
 <div style={{ position: 'relative', width: '100%', height: 300 }}>
   <Image src="/your-image.png" alt="..." fill style={{ objectFit: 'cover' }} />
 </div>`,
-          suggestions: [
-            "Next.js <Image> provides automatic WebP conversion, lazy loading, and size optimization",
-            "Add width and height to prevent layout shift (CLS)"
-          ]
-        });
+            suggestions: [
+              "Next.js <Image> provides automatic WebP conversion, lazy loading, and size optimization",
+              "Add width and height to prevent layout shift (CLS)"
+            ]
+          });
+        }
       }
     });
     return diagnostics;
@@ -1197,9 +1558,10 @@ var rule16 = {
   id: "no-console-log",
   severity: "warning",
   category: "best-practice",
-  frameworks: ["react-native", "expo"],
-  check(ast, filePath, sourceLines) {
+  frameworks: ["react-native", "expo", "astro"],
+  check(ast, filePath, sourceLines, context) {
     const diagnostics = [];
+    const isAstro = context?.framework === "astro" || filePath.endsWith(".astro");
     traverse(ast, (node) => {
       if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression" || node.callee.object.type !== "Identifier" || node.callee.object.name !== "console" || node.callee.property.type !== "Identifier") return;
       const method = node.callee.property.name;
@@ -1218,7 +1580,12 @@ var rule16 = {
         line,
         column,
         codeSnippet: getCodeSnippet(sourceLines, line),
-        fix: `// Option 1: Remove the console statement entirely
+        fix: isAstro ? `// Option 1: Remove the console statement entirely
+
+// Option 2: Guard with Vite/Astro import.meta.env.DEV:
+if (import.meta.env.DEV) {
+  console.${method}('debug info');
+}` : `// Option 1: Remove the console statement entirely
 
 // Option 2: Use __DEV__ guard (React Native built-in):
 if (__DEV__) {
@@ -1228,7 +1595,9 @@ if (__DEV__) {
 // Option 3: Use a logger library like react-native-logs:
 import { logger } from './logger';
 logger.${method === "log" ? "debug" : method}('message');`,
-        suggestions: [
+        suggestions: isAstro ? [
+          "Wrap debug logs in if (import.meta.env.DEV) so Vite tree-shakes them out of production builds"
+        ] : [
           "console statements are stripped in release builds by Metro, but leaving them adds noise"
         ]
       });
@@ -1446,6 +1815,655 @@ var rule19 = {
 };
 var constants_manifest_default = rule19;
 
+// src/rules/astro-v7-breaking.ts
+var REMOVED_V7_EXPERIMENTAL_FLAGS = /* @__PURE__ */ new Set([
+  "rustCompiler",
+  "queuedRendering",
+  "advancedRouting",
+  "logger"
+]);
+var REMOVED_TRANSITION_EXPORTS = /* @__PURE__ */ new Set([
+  "ViewTransitions",
+  "TRANSITION_BEFORE_PREPARATION",
+  "TRANSITION_AFTER_PREPARATION",
+  "TRANSITION_BEFORE_SWAP",
+  "TRANSITION_AFTER_SWAP",
+  "TRANSITION_PAGE_LOAD",
+  "isTransitionBeforePreparationEvent",
+  "isTransitionBeforeSwapEvent",
+  "createAnimationScope"
+]);
+var rule20 = {
+  id: "astro-v7-breaking",
+  severity: "error",
+  category: "correctness",
+  frameworks: ["astro"],
+  check(ast, filePath, sourceLines, context) {
+    const diagnostics = [];
+    const astroVersion = context?.astroVersion ?? 7;
+    const isAstroConfig = /astro\.config\.(mjs|ts|mts|js|cjs)$/.test(filePath);
+    traverse(ast, (node) => {
+      if (node.type === "CallExpression" && node.callee.type === "MemberExpression" && node.callee.object.type === "Identifier" && node.callee.object.name === "Astro" && node.callee.property.type === "Identifier" && node.callee.property.name === "glob") {
+        const line = node.loc.start.line;
+        const column = node.loc.start.column;
+        const severity = astroVersion >= 6 ? "error" : "warning";
+        diagnostics.push({
+          ruleId: "astro-v7-breaking",
+          severity,
+          category: "correctness",
+          confidence: 0.98,
+          message: astroVersion >= 6 ? `Astro.glob() was removed in Astro 6 (project target: Astro ${astroVersion}) \u2014 use getCollection() or import.meta.glob()` : "Astro.glob() is deprecated in Astro 5 and removed in Astro 6+ \u2014 migrate to getCollection() or import.meta.glob()",
+          component: detectComponent(node),
+          filePath,
+          line,
+          column,
+          codeSnippet: getCodeSnippet(sourceLines, line),
+          fix: `// Option 1: Content Layer API (recommended for Markdown/MDX/JSON):
+import { getCollection } from 'astro:content';
+const posts = await getCollection('blog');
+
+// Option 2: Vite import.meta.glob (for raw component/file imports):
+const pages = Object.values(import.meta.glob('./posts/*.md', { eager: true }));`,
+          suggestions: [
+            "Astro 6+ completely removed Astro.glob() in favor of the Content Layer API",
+            "Use import.meta.glob(..., { eager: true }) for non-collection local files"
+          ]
+        });
+      }
+      if (node.type === "ImportDeclaration" && node.source.value === "astro:transitions") {
+        for (const spec of node.specifiers) {
+          if (spec.type === "ImportSpecifier" && spec.imported.type === "Identifier") {
+            const importedName = spec.imported.name;
+            if (REMOVED_TRANSITION_EXPORTS.has(importedName)) {
+              const line = spec.loc.start.line;
+              const column = spec.loc.start.column;
+              const isViewTransitions = importedName === "ViewTransitions";
+              const severity = astroVersion >= 6 ? "error" : "warning";
+              diagnostics.push({
+                ruleId: "astro-v7-breaking",
+                severity,
+                category: "correctness",
+                confidence: 0.95,
+                message: isViewTransitions ? `<ViewTransitions /> was replaced by <ClientRouter /> in Astro 6+ (project target: Astro ${astroVersion})` : `"${importedName}" from astro:transitions was removed in Astro 7 \u2014 use standard lifecycle event names`,
+                component: detectComponent(node),
+                filePath,
+                line,
+                column,
+                codeSnippet: getCodeSnippet(sourceLines, line),
+                fix: isViewTransitions ? `---
+import { ClientRouter } from 'astro:transitions';
+---
+<head>
+  <ClientRouter />
+</head>` : `// Use standard lifecycle event strings directly:
+document.addEventListener('astro:before-swap', (event) => {
+  // handle swap
+});`,
+                suggestions: [
+                  "Rename <ViewTransitions /> to <ClientRouter /> in your layout <head>",
+                  "Astro 7 removed low-level transition constants in favor of standard event listeners"
+                ]
+              });
+            }
+          }
+        }
+      }
+      if (node.type === "ImportDeclaration" && (node.source.value === "astro:db" || node.source.value === "@astrojs/db")) {
+        if (astroVersion >= 6) {
+          const line = node.loc.start.line;
+          const column = node.loc.start.column;
+          const severity = astroVersion >= 7 ? "error" : "warning";
+          diagnostics.push({
+            ruleId: "astro-v7-breaking",
+            severity,
+            category: "correctness",
+            confidence: 0.95,
+            message: astroVersion >= 7 ? `${node.source.value} (@astrojs/db) was removed in Astro 7 \u2014 migrate to Drizzle ORM or node:sqlite` : `${node.source.value} (@astrojs/db) is deprecated in Astro 6 and removed in Astro 7`,
+            component: detectComponent(node),
+            filePath,
+            line,
+            column,
+            codeSnippet: getCodeSnippet(sourceLines, line),
+            fix: `// Migrate from astro:db to Drizzle ORM + libSQL / node:sqlite:
+import { drizzle } from 'drizzle-orm/libsql';
+import { createClient } from '@libsql/client';
+
+const client = createClient({ url: import.meta.env.DATABASE_URL });
+export const db = drizzle(client);`,
+            suggestions: [
+              "Astro 7 removed @astrojs/db and astro db CLI commands",
+              "Since Astro 6+ requires Node 22+, you can also use built-in node:sqlite or Drizzle ORM directly"
+            ]
+          });
+        }
+      }
+      if (isAstroConfig && node.type === "Property" && node.key.type === "Identifier") {
+        if (node.key.name === "experimental" && node.value.type === "ObjectExpression" && astroVersion >= 6) {
+          for (const prop of node.value.properties) {
+            if (prop.type === "Property" && prop.key.type === "Identifier" && REMOVED_V7_EXPERIMENTAL_FLAGS.has(prop.key.name)) {
+              const flagName = prop.key.name;
+              const line = prop.loc.start.line;
+              const column = prop.loc.start.column;
+              const severity = astroVersion >= 7 ? "error" : "warning";
+              diagnostics.push({
+                ruleId: "astro-v7-breaking",
+                severity,
+                category: "correctness",
+                confidence: 0.95,
+                message: astroVersion >= 7 ? `experimental.${flagName} was promoted/removed in Astro 7 \u2014 remove it from astro.config` : `experimental.${flagName} becomes a stable default in Astro 7`,
+                component: "astro.config",
+                filePath,
+                line,
+                column,
+                codeSnippet: getCodeSnippet(sourceLines, line),
+                fix: flagName === "logger" ? `// Move logger to the top-level defineConfig({ ... }):
+export default defineConfig({
+  logger: { /* ... */ },
+});` : `// Remove experimental.${flagName} \u2014 it is enabled by default in Astro 7:
+export default defineConfig({
+  // experimental.${flagName} is now the default behavior
+});`,
+                suggestions: [
+                  "Astro 7 uses the Rust compiler, queued rendering, and advanced routing by default",
+                  "Keeping promoted experimental flags in astro.config causes validation errors in Astro 7"
+                ]
+              });
+            }
+          }
+        }
+        if (node.key.name === "legacy" && node.value.type === "ObjectExpression") {
+          for (const prop of node.value.properties) {
+            if (prop.type === "Property" && prop.key.type === "Identifier" && prop.key.name === "collections") {
+              const line = prop.loc.start.line;
+              const column = prop.loc.start.column;
+              const severity = astroVersion >= 6 ? "error" : "warning";
+              diagnostics.push({
+                ruleId: "astro-v7-breaking",
+                severity,
+                category: "correctness",
+                confidence: 0.95,
+                message: astroVersion >= 6 ? "legacy.collections was removed in Astro 6+ \u2014 migrate to the Content Layer API" : "legacy.collections is deprecated in Astro 5 and removed in Astro 6+",
+                component: "astro.config",
+                filePath,
+                line,
+                column,
+                codeSnippet: getCodeSnippet(sourceLines, line),
+                fix: `// Move your config to src/content.config.ts and use a loader:
+import { defineCollection, z } from 'astro:content';
+import { glob } from 'astro/loaders';
+
+const blog = defineCollection({
+  loader: glob({ pattern: '**/*.md', base: './src/data/blog' }),
+  schema: z.object({ title: z.string() }),
+});
+
+export const collections = { blog };`,
+                suggestions: [
+                  "Remove legacy: { collections: true } from astro.config",
+                  "Use src/content.config.ts with glob() or file() loaders from astro/loaders"
+                ]
+              });
+            }
+          }
+        }
+      }
+    });
+    return diagnostics;
+  }
+};
+var astro_v7_breaking_default = rule20;
+
+// src/rules/astro-legacy-content-config.ts
+function isLegacyContentConfigPath(filePath) {
+  const normalized = filePath.replace(/\\/g, "/");
+  return normalized.endsWith("/src/content/config.ts") || normalized.endsWith("/src/content/config.js");
+}
+function isModernContentConfigPath(filePath) {
+  const normalized = filePath.replace(/\\/g, "/");
+  return normalized.endsWith("/src/content.config.ts") || normalized.endsWith("/src/content.config.mjs");
+}
+var rule21 = {
+  id: "astro-legacy-content-config",
+  severity: "warning",
+  category: "best-practice",
+  frameworks: ["astro"],
+  check(ast, filePath, sourceLines, context) {
+    const diagnostics = [];
+    const astroVersion = context?.astroVersion ?? 7;
+    const isLegacyPath = isLegacyContentConfigPath(filePath);
+    const isModernPath = isModernContentConfigPath(filePath);
+    if (!isLegacyPath && !isModernPath) return diagnostics;
+    if (isLegacyPath) {
+      const severity = astroVersion >= 6 ? "error" : "warning";
+      diagnostics.push({
+        ruleId: "astro-legacy-content-config",
+        severity,
+        category: "best-practice",
+        confidence: 0.95,
+        message: astroVersion >= 6 ? `Legacy src/content/config.ts path detected \u2014 Astro ${astroVersion} requires src/content.config.ts with Content Layer loaders` : "Legacy src/content/config.ts detected \u2014 migrate to src/content.config.ts (Content Layer API)",
+        component: "content-config",
+        filePath,
+        line: 1,
+        column: 0,
+        codeSnippet: getCodeSnippet(sourceLines, 1),
+        fix: `// 1. Move file from src/content/config.ts -> src/content.config.ts
+// 2. Add an explicit loader from 'astro/loaders':
+import { defineCollection, z } from 'astro:content';
+import { glob } from 'astro/loaders';
+
+const blog = defineCollection({
+  loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/blog' }),
+  schema: z.object({
+    title: z.string(),
+  }),
+});
+
+export const collections = { blog };`,
+        suggestions: [
+          "Content Layer API replaces legacy content collections in Astro 6 and Astro 7",
+          "Explicit glob() or file() loaders enable up to 5x faster builds and Astro 7 Rust Markdown processing"
+        ]
+      });
+    }
+    traverse(ast, (node) => {
+      if (node.type === "CallExpression" && node.callee.type === "Identifier" && node.callee.name === "defineCollection" && node.arguments.length > 0 && node.arguments[0].type === "ObjectExpression") {
+        const obj = node.arguments[0];
+        const hasLoader = obj.properties.some(
+          (p) => p.type === "Property" && p.key.type === "Identifier" && p.key.name === "loader"
+        );
+        if (!hasLoader) {
+          const line = node.loc.start.line;
+          const column = node.loc.start.column;
+          const severity = astroVersion >= 6 ? "error" : "warning";
+          diagnostics.push({
+            ruleId: "astro-legacy-content-config",
+            severity,
+            category: "best-practice",
+            confidence: 0.9,
+            message: 'defineCollection() is missing a "loader" \u2014 Content Layer API requires glob() or file() loader',
+            component: "content-config",
+            filePath,
+            line,
+            column,
+            codeSnippet: getCodeSnippet(sourceLines, line),
+            fix: `import { defineCollection, z } from 'astro:content';
+import { glob } from 'astro/loaders';
+
+const collection = defineCollection({
+  loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/blog' }),
+  schema: z.object({ /* ... */ }),
+});`,
+            suggestions: [
+              'Import glob or file from "astro/loaders" and specify the loader property'
+            ]
+          });
+        }
+      }
+    });
+    return diagnostics;
+  }
+};
+var astro_legacy_content_config_default = rule21;
+
+// src/rules/astro-client-directive-on-html.ts
+var CLIENT_DIRECTIVES = /* @__PURE__ */ new Set(["load", "idle", "visible", "media", "only"]);
+function getClientDirectiveName(attr) {
+  if (attr.type !== "JSXAttribute") return null;
+  if (attr.name.type === "JSXNamespacedName" && attr.name.namespace.name === "client" && CLIENT_DIRECTIVES.has(attr.name.name.name)) {
+    return `client:${attr.name.name.name}`;
+  }
+  return null;
+}
+var rule22 = {
+  id: "astro-client-directive-on-html",
+  severity: "error",
+  category: "correctness",
+  frameworks: ["astro"],
+  check(ast, filePath, sourceLines) {
+    if (!filePath.endsWith(".astro")) return [];
+    const diagnostics = [];
+    traverse(ast, (node) => {
+      if (node.type !== "JSXOpeningElement") return;
+      if (node.name.type !== "JSXIdentifier") return;
+      const tagName = node.name.name;
+      if (!/^[a-z]/.test(tagName)) return;
+      for (const attr of node.attributes) {
+        const directive = getClientDirectiveName(attr);
+        if (!directive) continue;
+        const line = attr.loc?.start.line ?? node.loc.start.line;
+        const column = attr.loc?.start.column ?? node.loc.start.column;
+        const component = detectComponent(node);
+        diagnostics.push({
+          ruleId: "astro-client-directive-on-html",
+          severity: "error",
+          category: "correctness",
+          confidence: 1,
+          message: `"${directive}" cannot be used on native HTML element <${tagName}> \u2014 client directives only work on UI framework components`,
+          component,
+          filePath,
+          line,
+          column,
+          codeSnippet: getCodeSnippet(sourceLines, line),
+          fix: `<!-- Option 1: Use client:* on an imported React/UI component (PascalCase): -->
+<InteractiveButton ${directive} />
+
+<!-- Option 2: For native HTML interactivity in .astro, use a standard <script> tag: -->
+<${tagName} id="my-element">...</${tagName}>
+<script>
+  document.getElementById('my-element')?.addEventListener('click', () => {
+    // client-side logic
+  });
+</script>`,
+          suggestions: [
+            "Astro throws a compiler error when client:* directives are placed on native HTML tags",
+            "Move interactive UI into a PascalCase component (.tsx/.jsx) or attach listeners via <script>"
+          ]
+        });
+      }
+    });
+    return diagnostics;
+  }
+};
+var astro_client_directive_on_html_default = rule22;
+
+// src/rules/astro-client-only-missing-framework.ts
+function hasNonEmptyFrameworkValue(attr) {
+  if (!attr.value) return false;
+  if (attr.value.type === "Literal" && typeof attr.value.value === "string") {
+    return attr.value.value.trim().length > 0;
+  }
+  if (attr.value.type === "JSXExpressionContainer" && attr.value.expression.type === "Literal" && typeof attr.value.expression.value === "string") {
+    return attr.value.expression.value.trim().length > 0;
+  }
+  return false;
+}
+var rule23 = {
+  id: "astro-client-only-missing-framework",
+  severity: "error",
+  category: "correctness",
+  frameworks: ["astro"],
+  check(ast, filePath, sourceLines) {
+    if (!filePath.endsWith(".astro")) return [];
+    const diagnostics = [];
+    traverse(ast, (node) => {
+      if (node.type !== "JSXOpeningElement") return;
+      const tagName = node.name.type === "JSXIdentifier" ? node.name.name : "Component";
+      for (const attr of node.attributes) {
+        if (attr.type === "JSXAttribute" && attr.name.type === "JSXNamespacedName" && attr.name.namespace.name === "client" && attr.name.name.name === "only") {
+          if (hasNonEmptyFrameworkValue(attr)) continue;
+          const line = attr.loc?.start.line ?? node.loc.start.line;
+          const column = attr.loc?.start.column ?? node.loc.start.column;
+          const component = detectComponent(node);
+          diagnostics.push({
+            ruleId: "astro-client-only-missing-framework",
+            severity: "error",
+            category: "correctness",
+            confidence: 1,
+            message: `client:only on <${tagName}> requires an explicit framework name (e.g. client:only="react")`,
+            component,
+            filePath,
+            line,
+            column,
+            codeSnippet: getCodeSnippet(sourceLines, line),
+            fix: `<!-- Pass the UI framework name to client:only: -->
+<${tagName} client:only="react" />
+
+<!-- Supported values: "react" | "preact" | "solid-js" | "svelte" | "vue" -->`,
+            suggestions: [
+              "Because client:only skips server rendering, Astro cannot auto-detect which UI renderer to bundle without the framework hint"
+            ]
+          });
+        }
+      }
+    });
+    return diagnostics;
+  }
+};
+var astro_client_only_missing_framework_default = rule23;
+
+// src/rules/astro-hooks-in-astro.ts
+var REACT_HOOKS = /* @__PURE__ */ new Set([
+  "useState",
+  "useEffect",
+  "useReducer",
+  "useCallback",
+  "useMemo",
+  "useRef",
+  "useContext",
+  "useLayoutEffect",
+  "useTransition",
+  "useDeferredValue",
+  "useId"
+]);
+function getCalledHookName(node) {
+  if (node.callee.type === "Identifier" && REACT_HOOKS.has(node.callee.name)) {
+    return node.callee.name;
+  }
+  if (node.callee.type === "MemberExpression" && node.callee.object.type === "Identifier" && node.callee.object.name === "React" && node.callee.property.type === "Identifier" && REACT_HOOKS.has(node.callee.property.name)) {
+    return node.callee.property.name;
+  }
+  return null;
+}
+var rule24 = {
+  id: "astro-hooks-in-astro",
+  severity: "error",
+  category: "correctness",
+  frameworks: ["astro"],
+  check(ast, filePath, sourceLines) {
+    if (!filePath.endsWith(".astro")) return [];
+    const diagnostics = [];
+    traverse(ast, (node) => {
+      if (node.type !== "CallExpression") return;
+      const hookName = getCalledHookName(node);
+      if (!hookName) return;
+      const line = node.loc.start.line;
+      const column = node.loc.start.column;
+      const component = detectComponent(node);
+      diagnostics.push({
+        ruleId: "astro-hooks-in-astro",
+        severity: "error",
+        category: "correctness",
+        confidence: 0.98,
+        message: `${hookName}() cannot be called inside an .astro file \u2014 Astro components run only once on the server`,
+        component,
+        filePath,
+        line,
+        column,
+        codeSnippet: getCodeSnippet(sourceLines, line),
+        fix: `// 1. Move stateful hook logic into a React island (e.g. src/components/Counter.tsx):
+import { ${hookName} } from 'react';
+export default function Counter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount(c => c + 1)}>{count}</button>;
+}
+
+// 2. Render and hydrate the island inside your .astro file:
+---
+import Counter from '../components/Counter.tsx';
+---
+<Counter client:visible />`,
+        suggestions: [
+          ".astro frontmatter runs at build/SSR time and never hydrates on the client",
+          "Extract interactive React hooks into a .tsx component and mount it with client:visible or client:idle"
+        ]
+      });
+    });
+    return diagnostics;
+  }
+};
+var astro_hooks_in_astro_default = rule24;
+
+// src/rules/astro-client-load-overuse.ts
+var rule25 = {
+  id: "astro-client-load-overuse",
+  severity: "warning",
+  category: "performance",
+  frameworks: ["astro"],
+  check(ast, filePath, sourceLines) {
+    if (!filePath.endsWith(".astro")) return [];
+    const diagnostics = [];
+    traverse(ast, (node) => {
+      if (node.type !== "JSXOpeningElement") return;
+      if (node.name.type !== "JSXIdentifier") return;
+      const tagName = node.name.name;
+      if (!/^[A-Z]/.test(tagName)) return;
+      for (const attr of node.attributes) {
+        if (attr.type === "JSXAttribute" && attr.name.type === "JSXNamespacedName" && attr.name.namespace.name === "client" && attr.name.name.name === "load") {
+          const line = attr.loc?.start.line ?? node.loc.start.line;
+          const column = attr.loc?.start.column ?? node.loc.start.column;
+          const component = detectComponent(node);
+          diagnostics.push({
+            ruleId: "astro-client-load-overuse",
+            severity: "warning",
+            category: "performance",
+            confidence: 0.75,
+            message: `client:load on <${tagName}> hydrates immediately and blocks main thread \u2014 prefer client:visible or client:idle`,
+            component,
+            filePath,
+            line,
+            column,
+            codeSnippet: getCodeSnippet(sourceLines, line),
+            fix: `<!-- For below-the-fold components (hydrates when scrolled into view): -->
+<${tagName} client:visible />
+
+<!-- For non-critical interactive UI (hydrates during browser idle time): -->
+<${tagName} client:idle />`,
+            suggestions: [
+              "Reserve client:load strictly for above-the-fold controls that must respond within the first millisecond",
+              "Switching to client:visible or client:idle improves Total Blocking Time (TBT) and LCP"
+            ]
+          });
+        }
+      }
+    });
+    return diagnostics;
+  }
+};
+var astro_client_load_overuse_default = rule25;
+
+// src/rules/astro-unsafe-set-html.ts
+function isStaticStringExpression(attr) {
+  if (!attr.value) return true;
+  if (attr.value.type === "Literal" && typeof attr.value.value === "string") {
+    return true;
+  }
+  if (attr.value.type === "JSXExpressionContainer" && attr.value.expression.type === "Literal" && typeof attr.value.expression.value === "string") {
+    return true;
+  }
+  return false;
+}
+var rule26 = {
+  id: "astro-unsafe-set-html",
+  severity: "warning",
+  category: "best-practice",
+  frameworks: ["astro"],
+  check(ast, filePath, sourceLines) {
+    if (!filePath.endsWith(".astro")) return [];
+    const diagnostics = [];
+    traverse(ast, (node) => {
+      if (node.type !== "JSXOpeningElement") return;
+      for (const attr of node.attributes) {
+        if (attr.type === "JSXAttribute" && attr.name.type === "JSXNamespacedName" && attr.name.namespace.name === "set" && attr.name.name.name === "html") {
+          if (isStaticStringExpression(attr)) continue;
+          const line = attr.loc?.start.line ?? node.loc.start.line;
+          const column = attr.loc?.start.column ?? node.loc.start.column;
+          const component = detectComponent(node);
+          diagnostics.push({
+            ruleId: "astro-unsafe-set-html",
+            severity: "warning",
+            category: "best-practice",
+            confidence: 0.8,
+            message: "set:html used with a dynamic expression \u2014 ensure HTML is sanitized to prevent XSS",
+            component,
+            filePath,
+            line,
+            column,
+            codeSnippet: getCodeSnippet(sourceLines, line),
+            fix: `---
+import sanitizeHtml from 'sanitize-html';
+const safeHtml = sanitizeHtml(rawHtml);
+---
+<div set:html={safeHtml} />
+
+<!-- Or for plain text content, use standard JSX expression or set:text: -->
+<div set:text={plainText} />`,
+            suggestions: [
+              "Astro does not automatically sanitize expressions passed to set:html",
+              "For Markdown content from Content Collections, prefer the <Content /> component returned by render(entry)"
+            ]
+          });
+        }
+      }
+    });
+    return diagnostics;
+  }
+};
+var astro_unsafe_set_html_default = rule26;
+
+// src/rules/astro-inline-script.ts
+function hasDefineVarsOrExternalSrc(attrs) {
+  return attrs.some((a) => {
+    if (a.type !== "JSXAttribute") return false;
+    if (a.name.type === "JSXNamespacedName" && a.name.namespace.name === "define" && a.name.name.name === "vars") {
+      return true;
+    }
+    if (a.name.type === "JSXIdentifier" && a.name.name === "src") {
+      return true;
+    }
+    return false;
+  });
+}
+var rule27 = {
+  id: "astro-inline-script",
+  severity: "warning",
+  category: "performance",
+  frameworks: ["astro"],
+  check(ast, filePath, sourceLines) {
+    if (!filePath.endsWith(".astro")) return [];
+    const diagnostics = [];
+    traverse(ast, (node) => {
+      if (node.type !== "JSXOpeningElement") return;
+      if (node.name.type !== "JSXIdentifier" || node.name.name !== "script") return;
+      if (hasDefineVarsOrExternalSrc(node.attributes)) return;
+      for (const attr of node.attributes) {
+        if (attr.type === "JSXAttribute" && attr.name.type === "JSXNamespacedName" && attr.name.namespace.name === "is" && attr.name.name.name === "inline") {
+          const line = attr.loc?.start.line ?? node.loc.start.line;
+          const column = attr.loc?.start.column ?? node.loc.start.column;
+          const component = detectComponent(node);
+          diagnostics.push({
+            ruleId: "astro-inline-script",
+            severity: "warning",
+            category: "performance",
+            confidence: 0.75,
+            message: "<script is:inline> disables Astro bundling, minification, and script deduplication",
+            component,
+            filePath,
+            line,
+            column,
+            codeSnippet: getCodeSnippet(sourceLines, line),
+            fix: `<!-- Remove is:inline so Astro bundles, tree-shakes, and deduplicates the script: -->
+<script>
+  // Runs once per page as a bundled ES module (even if component renders multiple times)
+</script>
+
+<!-- If you need frontmatter variables on the client, pass them via data-* attributes: -->
+<div id="widget" data-api-url={apiUrl}></div>
+<script>
+  const url = document.getElementById('widget')?.dataset.apiUrl;
+</script>`,
+            suggestions: [
+              "Standard <script> tags in Astro are automatically bundled, minified, and executed as deferred ES modules",
+              "Use is:inline only when a script must execute synchronously in <head> before first paint (e.g. dark mode theme flash prevention)"
+            ]
+          });
+        }
+      }
+    });
+    return diagnostics;
+  }
+};
+var astro_inline_script_default = rule27;
+
 // src/rules/index.ts
 var allRules = [
   fetch_in_effect_default,
@@ -1466,7 +2484,15 @@ var allRules = [
   no_console_log_default,
   flatlist_for_lists_default,
   rn_accessibility_default,
-  constants_manifest_default
+  constants_manifest_default,
+  astro_v7_breaking_default,
+  astro_legacy_content_config_default,
+  astro_client_directive_on_html_default,
+  astro_client_only_missing_framework_default,
+  astro_hooks_in_astro_default,
+  astro_client_load_overuse_default,
+  astro_unsafe_set_html_default,
+  astro_inline_script_default
 ];
 var ruleMap = new Map(
   allRules.map((r) => [r.id, r])
@@ -1477,26 +2503,129 @@ var FRAMEWORK_LABELS = {
   react: "React",
   next: "Next.js",
   "react-native": "React Native",
-  expo: "Expo"
+  expo: "Expo",
+  astro: "Astro"
 };
 var FRAMEWORK_DESCRIPTIONS = {
   react: "Create React App, Vite, etc.",
   next: "App Router / Pages Router",
   "react-native": "Bare workflow",
-  expo: "Managed / Bare workflow"
+  expo: "Managed / Bare workflow",
+  astro: "Islands, Content Layer, SSR / SSG (v5\u2013v7)"
 };
 function getRulesForFramework(framework) {
   if (!framework) return allRules;
   return allRules.filter((r) => r.frameworks.includes(framework));
 }
 
+// src/project-detector.ts
+var fs2 = __toESM(require("fs"));
+var path2 = __toESM(require("path"));
+var ASTRO_CONFIG_FILES = [
+  "astro.config.mjs",
+  "astro.config.ts",
+  "astro.config.mts",
+  "astro.config.js",
+  "astro.config.cjs"
+];
+function findProjectRoot(startPath) {
+  let current = path2.resolve(startPath);
+  try {
+    const stat = fs2.statSync(current);
+    if (!stat.isDirectory()) {
+      current = path2.dirname(current);
+    }
+  } catch {
+  }
+  let dir = current;
+  for (let i = 0; i < 5; i++) {
+    if (fs2.existsSync(path2.join(dir, "package.json")) || ASTRO_CONFIG_FILES.some((cfg) => fs2.existsSync(path2.join(dir, cfg)))) {
+      return dir;
+    }
+    const parent = path2.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return current;
+}
+function parseAstroVersion(raw) {
+  if (raw === void 0 || raw === null) return void 0;
+  const str = String(raw).trim();
+  const match = str.match(/(\d+)/);
+  if (!match) return void 0;
+  const major = parseInt(match[1], 10);
+  if (major <= 5) return 5;
+  if (major === 6) return 6;
+  return 7;
+}
+function detectProjectContext(targetPath, astroVersionOverride) {
+  const projectRoot = findProjectRoot(targetPath);
+  const pkgPath = path2.join(projectRoot, "package.json");
+  let detectedFramework;
+  let astroVersion = astroVersionOverride ?? 7;
+  let astroVersionDetected = Boolean(astroVersionOverride);
+  const hasAstroConfig = ASTRO_CONFIG_FILES.some(
+    (cfg) => fs2.existsSync(path2.join(projectRoot, cfg))
+  );
+  if (fs2.existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(fs2.readFileSync(pkgPath, "utf-8"));
+      const deps = {
+        ...pkg.devDependencies ?? {},
+        ...pkg.dependencies ?? {}
+      };
+      if ("astro" in deps || hasAstroConfig) {
+        detectedFramework = "astro";
+        if (!astroVersionOverride && deps.astro) {
+          const parsed = parseAstroVersion(deps.astro);
+          if (parsed) {
+            astroVersion = parsed;
+            astroVersionDetected = true;
+          }
+        }
+      } else if ("expo" in deps) {
+        detectedFramework = "expo";
+      } else if ("react-native" in deps) {
+        detectedFramework = "react-native";
+      } else if ("next" in deps) {
+        detectedFramework = "next";
+      } else if ("react" in deps) {
+        detectedFramework = "react";
+      }
+    } catch {
+      if (hasAstroConfig) {
+        detectedFramework = "astro";
+      }
+    }
+  } else if (hasAstroConfig) {
+    detectedFramework = "astro";
+  }
+  return {
+    detectedFramework,
+    astroVersion,
+    astroVersionDetected,
+    projectRoot
+  };
+}
+
 // src/scanner.ts
-var GLOB_PATTERNS = ["**/*.tsx", "**/*.ts", "**/*.jsx", "**/*.js"];
+var BASE_GLOB_PATTERNS = ["**/*.tsx", "**/*.ts", "**/*.jsx", "**/*.js"];
+var ASTRO_GLOB_PATTERNS = [
+  "**/*.astro",
+  "**/*.tsx",
+  "**/*.ts",
+  "**/*.jsx",
+  "**/*.js",
+  "**/astro.config.mjs",
+  "**/astro.config.mts",
+  "**/astro.config.cjs"
+];
 var IGNORE_PATTERNS = [
   "**/node_modules/**",
   "**/dist/**",
   "**/build/**",
   "**/.next/**",
+  "**/.astro/**",
   "**/coverage/**",
   "**/*.test.*",
   "**/*.spec.*",
@@ -1516,13 +2645,21 @@ function dedup(diagnostics) {
 }
 async function scan(options) {
   const { targetPath, framework, ruleId, ignore = [] } = options;
+  const projectCtx = detectProjectContext(targetPath, options.astroVersion);
+  const effectiveAstroVersion = options.astroVersion ?? projectCtx.astroVersion;
+  const includeAstroFiles = framework === "astro" || !framework && projectCtx.detectedFramework === "astro" || Boolean(ruleId && ruleId.startsWith("astro-"));
   const rules = ruleId ? [ruleMap.get(ruleId)].filter(Boolean) : getRulesForFramework(framework);
-  const files = await (0, import_fast_glob.default)(GLOB_PATTERNS, {
-    cwd: path.resolve(targetPath),
+  const globPatterns = includeAstroFiles ? ASTRO_GLOB_PATTERNS : BASE_GLOB_PATTERNS;
+  const files = await (0, import_fast_glob.default)(globPatterns, {
+    cwd: path3.resolve(targetPath),
     absolute: true,
     ignore: [...IGNORE_PATTERNS, ...ignore]
   });
   const diagnostics = [];
+  const ruleContext = {
+    framework,
+    astroVersion: effectiveAstroVersion
+  };
   for (const filePath of files) {
     const result = parseFile(filePath);
     if (isParseFailure(result)) {
@@ -1545,18 +2682,19 @@ async function scan(options) {
     }
     if (!result) continue;
     const { ast, sourceLines } = result;
-    for (const rule20 of rules) {
-      const ruleDiagnostics = rule20.check(ast, filePath, sourceLines);
+    for (const rule28 of rules) {
+      const ruleDiagnostics = rule28.check(ast, filePath, sourceLines, ruleContext);
       diagnostics.push(...ruleDiagnostics);
     }
   }
   return {
     diagnostics: dedup(diagnostics),
     totalFiles: files.length,
-    scannedFiles: files
+    scannedFiles: files,
+    astroVersion: framework === "astro" ? effectiveAstroVersion : void 0
   };
 }
-async function scanFile(filePath, framework, ruleId) {
+async function scanFile(filePath, framework, ruleId, astroVersion) {
   const rules = ruleId ? [ruleMap.get(ruleId)].filter(Boolean) : getRulesForFramework(framework);
   const result = parseFile(filePath);
   if (isParseFailure(result)) {
@@ -1579,8 +2717,12 @@ async function scanFile(filePath, framework, ruleId) {
   if (!result) return [];
   const { ast, sourceLines } = result;
   const diagnostics = [];
-  for (const rule20 of rules) {
-    diagnostics.push(...rule20.check(ast, filePath, sourceLines));
+  const ruleContext = {
+    framework,
+    astroVersion: astroVersion ?? 7
+  };
+  for (const rule28 of rules) {
+    diagnostics.push(...rule28.check(ast, filePath, sourceLines, ruleContext));
   }
   return dedup(diagnostics);
 }
@@ -1665,9 +2807,18 @@ var RULE_SUMMARY = {
   "constants-manifest": "Constants.manifest deprecated \u2014 use Constants.expoConfig",
   "no-console-log": "console statement in production code \u2014 remove or use a logger",
   "flatlist-for-lists": ".map() inside ScrollView \u2014 use FlatList for virtualization",
-  "rn-accessibility": "No accessibilityLabel \u2014 screen readers cannot identify this element"
+  "rn-accessibility": "No accessibilityLabel \u2014 screen readers cannot identify this element",
+  "astro-v7-breaking": "Removed or deprecated Astro 6/7 API \u2014 update to Astro v7 syntax",
+  "astro-legacy-content-config": "Legacy Content Collections config \u2014 migrate to src/content.config.ts with loader",
+  "astro-client-directive-on-html": "client:* directive on native HTML element \u2014 use a UI component or <script>",
+  "astro-client-only-missing-framework": 'client:only missing framework hint (e.g. client:only="react")',
+  "astro-hooks-in-astro": "React hook called inside .astro file \u2014 move to a .tsx/.jsx island",
+  "astro-client-load-overuse": "client:load hydrates immediately \u2014 prefer client:visible or client:idle",
+  "astro-unsafe-set-html": "Dynamic set:html expression \u2014 sanitize HTML to prevent XSS",
+  "astro-inline-script": "<script is:inline> opts out of Astro bundling and deduplication"
 };
 function normalizeMessage(ruleId, fallback) {
+  if (ruleId === "img-not-optimized" && fallback) return fallback;
   return RULE_SUMMARY[ruleId] ?? fallback;
 }
 function printGroupedByRule(diagnostics) {
@@ -1834,10 +2985,10 @@ function printHeader(fileCount, framework) {
 function printDiagnostic(diag) {
   const icon = diag.severity === "error" ? import_picocolors.default.red("\u2717") : import_picocolors.default.yellow("\u26A0");
   const loc = import_picocolors.default.dim(`${diag.line}:${diag.column}`);
-  const rule20 = import_picocolors.default.dim(diag.ruleId);
+  const rule28 = import_picocolors.default.dim(diag.ruleId);
   const cat = `[${categoryLabel(diag.category)}]`;
   const dots = confidenceDots(diag.confidence);
-  console.log(`  ${icon}  ${loc}  ${rule20}  ${cat}  ${dots}`);
+  console.log(`  ${icon}  ${loc}  ${rule28}  ${cat}  ${dots}`);
   console.log(`     ${import_picocolors.default.bold(diag.message)}`);
   console.log("");
   for (const line of diag.codeSnippet) {
@@ -2032,10 +3183,10 @@ function printAiPromptTerminal(diagnostics, _framework, _score) {
       const fileList = [];
       const seen = /* @__PURE__ */ new Set();
       for (const d of reps) {
-        const basename = d.filePath.split("/").pop() ?? d.filePath;
-        if (!seen.has(basename)) {
-          seen.add(basename);
-          fileList.push(basename);
+        const basename2 = d.filePath.split("/").pop() ?? d.filePath;
+        if (!seen.has(basename2)) {
+          seen.add(basename2);
+          fileList.push(basename2);
         }
       }
       const shownFiles = fileList.slice(0, 5);
@@ -2095,22 +3246,23 @@ function computeScore(diagnostics, totalFiles) {
 
 // src/watcher.ts
 var import_chokidar = __toESM(require("chokidar"));
-var path2 = __toESM(require("path"));
-var WATCH_EXTENSIONS = /\.(tsx?|jsx?)$/;
+var path4 = __toESM(require("path"));
+var WATCH_EXTENSIONS = /\.(tsx?|jsx?|astro|mjs|mts|cjs)$/;
 function startWatch(options) {
-  const { targetPath, framework, ruleId, ignore = [], allDiagnostics, totalFiles } = options;
+  const { targetPath, framework, astroVersion, ruleId, ignore = [], allDiagnostics, totalFiles } = options;
   const ignoredPatterns = [
     "**/node_modules/**",
     "**/dist/**",
     "**/build/**",
     "**/.next/**",
+    "**/.astro/**",
     "**/coverage/**",
     "**/*.test.*",
     "**/*.spec.*",
     "**/*.d.ts",
     ...ignore
   ];
-  const watcher = import_chokidar.default.watch(path2.resolve(targetPath), {
+  const watcher = import_chokidar.default.watch(path4.resolve(targetPath), {
     ignored: ignoredPatterns,
     persistent: true,
     ignoreInitial: true
@@ -2126,7 +3278,7 @@ function startWatch(options) {
   });
   async function handleChange(filePath) {
     if (!WATCH_EXTENSIONS.test(filePath)) return;
-    const newDiagnostics = await scanFile(filePath, framework, ruleId);
+    const newDiagnostics = await scanFile(filePath, framework, ruleId, astroVersion);
     if (newDiagnostics.length === 0) {
       allDiagnostics.delete(filePath);
     } else {
@@ -2183,7 +3335,7 @@ async function promptNextAction() {
       process.stdout.write("\x1B[1A\x1B[2K");
     }
   }
-  return new Promise((resolve4) => {
+  return new Promise((resolve5) => {
     readline.emitKeypressEvents(process.stdin);
     process.stdin.setRawMode(true);
     process.stdout.write("\n");
@@ -2207,7 +3359,7 @@ async function promptNextAction() {
   ${import_picocolors2.default.green("\u2713")} ${import_picocolors2.default.cyan(import_picocolors2.default.bold(chosen.label))}
 
 `);
-        resolve4(chosen.value);
+        resolve5(chosen.value);
       } else if (key.ctrl && key.name === "c") {
         process.stdin.setRawMode(false);
         process.stdout.write("\n");
@@ -2217,13 +3369,17 @@ async function promptNextAction() {
     process.stdin.on("keypress", onKey);
   });
 }
-var FRAMEWORKS = ["react", "next", "react-native", "expo"];
-async function promptFramework() {
-  let selected = 0;
+var FRAMEWORKS = ["react", "next", "react-native", "expo", "astro"];
+async function promptFramework(projectCtx) {
+  const detected = projectCtx?.detectedFramework;
+  let selected = detected ? Math.max(0, FRAMEWORKS.indexOf(detected)) : 0;
   const isTTY = process.stdin.isTTY && process.stdout.isTTY;
   if (!isTTY) {
+    if (detected) {
+      return detected;
+    }
     console.error(
-      "No framework specified. Use --react, --next, --react-native, or --expo."
+      "No framework specified. Use --react, --next, --react-native, --expo, or --astro."
     );
     process.exit(1);
   }
@@ -2237,10 +3393,13 @@ async function promptFramework() {
     for (let i = 0; i < FRAMEWORKS.length; i++) {
       const fw = FRAMEWORKS[i];
       const isActive = i === selected;
+      const isDetected = fw === detected;
       const cursor = isActive ? import_picocolors2.default.cyan("\u276F") : " ";
-      const label = isActive ? import_picocolors2.default.cyan(import_picocolors2.default.bold(FRAMEWORK_LABELS[fw])) : FRAMEWORK_LABELS[fw];
+      const baseLabel = FRAMEWORK_LABELS[fw];
+      const label = isActive ? import_picocolors2.default.cyan(import_picocolors2.default.bold(baseLabel)) : baseLabel;
+      const detectedBadge = isDetected ? fw === "astro" && projectCtx?.astroVersionDetected ? import_picocolors2.default.green(` (detected \xB7 v${projectCtx.astroVersion})`) : import_picocolors2.default.green(" (detected)") : "";
       const desc = import_picocolors2.default.dim(FRAMEWORK_DESCRIPTIONS[fw]);
-      process.stdout.write(`  ${cursor} ${label.padEnd(isActive ? 22 : 14)}  ${desc}
+      process.stdout.write(`  ${cursor} ${label.padEnd(isActive ? 22 : 14)}  ${desc}${detectedBadge}
 `);
     }
   }
@@ -2250,7 +3409,7 @@ async function promptFramework() {
       process.stdout.write("\x1B[1A\x1B[2K");
     }
   }
-  return new Promise((resolve4) => {
+  return new Promise((resolve5) => {
     readline.emitKeypressEvents(process.stdin);
     process.stdin.setRawMode(true);
     renderMenu();
@@ -2275,7 +3434,7 @@ async function promptFramework() {
 
 `
         );
-        resolve4(chosen);
+        resolve5(chosen);
       } else if (key.ctrl && key.name === "c") {
         process.stdin.setRawMode(false);
         process.stdout.write("\n");
@@ -2288,22 +3447,24 @@ async function promptFramework() {
 
 // src/cli.ts
 var program = new import_commander.Command();
-program.name("codehealth").description("React code scanner with framework-aware diagnostics and fix snippets").version("1.0.0").argument("[path]", "Path to scan (directory or file)", ".").option("--react", "Scan as a React project (CRA, Vite, etc.)").option("--next", "Scan as a Next.js project (App Router / Pages)").option("--react-native", "Scan as a React Native project").option("--expo", "Scan as an Expo project").option("-w, --watch", "Watch mode \u2014 re-scan on file changes").option("-r, --rule <ruleId>", "Run only a specific rule").option("--ignore <pattern>", "Glob pattern to ignore (can be repeated)", collect, []).option("--list-rules", "List all available rules (optionally filtered by framework flag)").option("--max-issues <n>", "Show only first N issues (0 = all)", "0").option("--compact", "Show file headers only, no code snippets or fix details").option("--ai-prompt", "Output a plain-text AI prompt for refactoring assistance").action(async (targetPath, options) => {
+program.name("codehealth-mali").description("Framework-aware React & Astro code scanner with diagnostics and fix snippets").version("1.2.0").argument("[path]", "Path to scan (directory or file)", ".").option("--react", "Scan as a React project (CRA, Vite, etc.)").option("--next", "Scan as a Next.js project (App Router / Pages)").option("--react-native", "Scan as a React Native project").option("--expo", "Scan as an Expo project").option("--astro", "Scan as an Astro project (.astro + React islands)").option("--astro-version <version>", "Target Astro major version (5, 6, or 7)").option("-w, --watch", "Watch mode \u2014 re-scan on file changes").option("-r, --rule <ruleId>", "Run only a specific rule").option("--ignore <pattern>", "Glob pattern to ignore (can be repeated)", collect, []).option("--list-rules", "List all available rules (optionally filtered by framework flag)").option("--max-issues <n>", "Show only first N issues (0 = all)", "0").option("--compact", "Show file headers only, no code snippets or fix details").option("--ai-prompt", "Output a plain-text AI prompt for refactoring assistance").action(async (targetPath, options) => {
   let framework;
   if (options.react) framework = "react";
   else if (options.next) framework = "next";
   else if (options.reactNative) framework = "react-native";
   else if (options.expo) framework = "expo";
+  else if (options.astro) framework = "astro";
+  const astroVersionOverride = parseAstroVersion(options.astroVersion);
   if (options.listRules) {
     const rules = getRulesForFramework(framework);
-    const header = framework ? `Rules for ${FRAMEWORK_LABELS[framework]}:` : "All available rules (use --react / --next / --react-native / --expo to filter):";
+    const header = framework ? `Rules for ${FRAMEWORK_LABELS[framework]}:` : "All available rules (use --react / --next / --react-native / --expo / --astro to filter):";
     console.log(`
 ${header}
 `);
-    for (const rule20 of rules) {
-      const icon = rule20.severity === "error" ? "\u2717" : "\u26A0";
-      const fws = rule20.frameworks.join(", ");
-      console.log(`  ${icon} ${rule20.id.padEnd(28)} [${rule20.severity.padEnd(7)}]  [${rule20.category.padEnd(14)}]  ${fws}`);
+    for (const rule28 of rules) {
+      const icon = rule28.severity === "error" ? "\u2717" : "\u26A0";
+      const fws = rule28.frameworks.join(", ");
+      console.log(`  ${icon} ${rule28.id.padEnd(36)} [${rule28.severity.padEnd(7)}]  [${rule28.category.padEnd(14)}]  ${fws}`);
     }
     console.log("");
     process.exit(0);
@@ -2313,13 +3474,15 @@ ${header}
     console.error(`Run with --list-rules to see available rules.`);
     process.exit(1);
   }
+  const resolvedPath = path5.resolve(process.cwd(), targetPath);
+  const projectCtx = detectProjectContext(resolvedPath, astroVersionOverride);
   if (!framework && !options.rule) {
-    framework = await promptFramework();
+    framework = await promptFramework(projectCtx);
   }
-  const resolvedPath = path3.resolve(process.cwd(), targetPath);
   const { diagnostics, totalFiles } = await scan({
     targetPath: resolvedPath,
     framework,
+    astroVersion: projectCtx.astroVersion,
     ruleId: options.rule,
     ignore: options.ignore
   });
@@ -2370,6 +3533,7 @@ ${header}
     startWatch({
       targetPath: resolvedPath,
       framework,
+      astroVersion: projectCtx.astroVersion,
       ruleId: options.rule,
       ignore: options.ignore,
       allDiagnostics: diagMap,

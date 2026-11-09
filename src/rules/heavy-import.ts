@@ -29,10 +29,11 @@ const rule: Rule = {
   id: 'heavy-import',
   severity: 'warning',
   category: 'performance',
-  frameworks: ['react', 'next'],
+  frameworks: ['react', 'next', 'astro'],
 
-  check(ast, filePath, sourceLines): Diagnostic[] {
+  check(ast, filePath, sourceLines, context): Diagnostic[] {
     const diagnostics: Diagnostic[] = [];
+    const isAstroFile = filePath.endsWith('.astro') || context?.framework === 'astro';
 
     traverse(ast, (node) => {
       if (node.type === 'ImportDeclaration') {
@@ -59,6 +60,17 @@ const formatted = format(parseISO(dateString), 'yyyy-MM-dd');`;
         } else if (source === 'lodash') {
           fix = `// Use tree-shakeable lodash-es:
 import { debounce, groupBy } from 'lodash-es';`;
+        } else if (isAstroFile) {
+          fix = `---
+// Option 1: Hydrate heavy UI only when visible in the viewport:
+import HeavyIsland from '../components/HeavyIsland.tsx';
+---
+<HeavyIsland client:visible />
+
+<!-- Option 2: Dynamically import inside a client <script> when needed: -->
+<script>
+  const module = await import('${source}');
+</script>`;
         } else {
           const varName = source.split('/').pop()!.replace(/[-@]/g, '_');
           fix = `// Lazy load the heavy module:

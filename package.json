@@ -1,9 +1,9 @@
 {
-  "name": "codehealth",
-  "version": "1.1.1",
-  "description": "Framework-aware React code scanner with precise diagnostics and copy-paste fix snippets",
+  "name": "codehealth-mali",
+  "version": "1.2.0",
+  "description": "Framework-aware React & Astro code scanner with precise diagnostics and copy-paste fix snippets",
   "bin": {
-    "codehealth": "./dist/cli.js"
+    "codehealth-mali": "./dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,6 +17,8 @@
   },
   "keywords": [
     "react",
+    "astro",
+    "nextjs",
     "lint",
     "scanner",
     "cli",
@@ -25,7 +27,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/EsraMulkpinar/codehealth"
+    "url": "https://github.com/malikilinc/codehealth-mali.git"
   },
   "author": "Esra",
   "license": "MIT",

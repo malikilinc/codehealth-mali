@@ -4,12 +4,14 @@ import { scanFile } from './scanner';
 import { printDiagnostics, printSummary } from './reporter';
 import { computeScore } from './scorer';
 import type { Diagnostic, Framework } from './rules/types';
+import type { AstroVersion } from './project-detector';
 
-const WATCH_EXTENSIONS = /\.(tsx?|jsx?)$/;
+const WATCH_EXTENSIONS = /\.(tsx?|jsx?|astro|mjs|mts|cjs)$/;
 
 export interface WatchOptions {
   targetPath: string;
   framework?: Framework;
+  astroVersion?: AstroVersion;
   ruleId?: string;
   ignore?: string[];
   allDiagnostics: Map<string, Diagnostic[]>;
@@ -17,13 +19,14 @@ export interface WatchOptions {
 }
 
 export function startWatch(options: WatchOptions): chokidar.FSWatcher {
-  const { targetPath, framework, ruleId, ignore = [], allDiagnostics, totalFiles } = options;
+  const { targetPath, framework, astroVersion, ruleId, ignore = [], allDiagnostics, totalFiles } = options;
 
   const ignoredPatterns = [
     '**/node_modules/**',
     '**/dist/**',
     '**/build/**',
     '**/.next/**',
+    '**/.astro/**',
     '**/coverage/**',
     '**/*.test.*',
     '**/*.spec.*',
@@ -50,7 +53,7 @@ export function startWatch(options: WatchOptions): chokidar.FSWatcher {
   async function handleChange(filePath: string): Promise<void> {
     if (!WATCH_EXTENSIONS.test(filePath)) return;
 
-    const newDiagnostics = await scanFile(filePath, framework, ruleId);
+    const newDiagnostics = await scanFile(filePath, framework, ruleId, astroVersion);
 
     if (newDiagnostics.length === 0) {
       allDiagnostics.delete(filePath);

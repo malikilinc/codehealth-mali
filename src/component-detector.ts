@@ -50,6 +50,11 @@ export function detectComponent(node: TSESTree.Node): string {
       }
     }
 
+    if (current.type === 'Program') {
+      const astroName = (current as TSESTree.Program & { __componentName?: string }).__componentName;
+      if (astroName) return astroName;
+    }
+
     current = current.parent;
   }
 

@@ -39,10 +39,12 @@ const rule: Rule = {
   id: 'a11y-label',
   severity: 'warning',
   category: 'accessibility',
-  frameworks: ['react', 'next'],
+  frameworks: ['react', 'next', 'astro'],
 
   check(ast, filePath, sourceLines): Diagnostic[] {
     const diagnostics: Diagnostic[] = [];
+    const isAstro = filePath.endsWith('.astro');
+    const forAttr = isAstro ? 'for' : 'htmlFor';
 
     traverse(ast, (node) => {
       if (node.type !== 'JSXOpeningElement') return;
@@ -78,7 +80,7 @@ const rule: Rule = {
 <${name} aria-label="Descriptive label" />
 
 // Option 2: Associate with a <label> element
-<label htmlFor="my-${name}">Label text</label>
+<label ${forAttr}="my-${name}">Label text</label>
 <${name} id="my-${name}" />
 
 // Option 3: Use aria-labelledby
@@ -87,7 +89,7 @@ const rule: Rule = {
           suggestions: [
             'WCAG 1.3.1: Form elements must have programmatic labels',
             'Placeholder text is not a substitute for a label',
-            'If using id, ensure a <label htmlFor="..."> element is also present',
+            `If using id, ensure a <label ${forAttr}="..."> element is also present`,
           ],
         });
       }
