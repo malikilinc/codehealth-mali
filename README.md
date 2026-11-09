@@ -212,7 +212,7 @@ The process exits with code `1` if any errors are found, making it easy to use i
 codehealth . --next --watch
 ```
 
-Uses [chokidar](https://github.com/paulmillr/chokidar) to watch `.ts`, `.tsx`, `.js`, `.jsx` files. When a file changes, only that file is re-scanned and the output is refreshed in place.
+Uses [chokidar](https://github.com/paulmillr/chokidar) to watch `.astro`, `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, and `.cjs` files. When a file changes, only that file is re-scanned and the output is refreshed in place.
 
 ---
 
@@ -257,7 +257,7 @@ interface Diagnostic {
   suggestions: string[];
 }
 
-type Framework = 'react' | 'next' | 'react-native' | 'expo';
+type Framework = 'react' | 'next' | 'react-native' | 'expo' | 'astro';
 ```
 
 ---

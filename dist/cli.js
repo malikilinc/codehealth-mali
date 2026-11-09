@@ -108,6 +108,70 @@ function normalizeVoidTagsAndShorthands(template) {
   result += template.slice(lastIndex);
   return result;
 }
+function extractAndMaskPairedTag(source, tagName, onInnerContent) {
+  const openRegex = new RegExp(`<${tagName}\\b`, "gi");
+  let result = "";
+  let lastIndex = 0;
+  let match;
+  while ((match = openRegex.exec(source)) !== null) {
+    const tagStart = match.index;
+    let i = tagStart + match[0].length;
+    let braceDepth = 0;
+    let quote = null;
+    let tagEnd = -1;
+    while (i < source.length) {
+      const ch = source[i];
+      if (quote) {
+        if (ch === "\\") {
+          i += 2;
+          continue;
+        }
+        if (ch === quote) quote = null;
+      } else {
+        if (ch === '"' || ch === "'" || ch === "`") {
+          quote = ch;
+        } else if (ch === "{") {
+          braceDepth++;
+        } else if (ch === "}") {
+          if (braceDepth > 0) braceDepth--;
+        } else if (ch === ">" && braceDepth === 0) {
+          tagEnd = i;
+          break;
+        }
+      }
+      i++;
+    }
+    if (tagEnd === -1) continue;
+    const openTag = source.slice(tagStart, tagEnd + 1);
+    if (/\/\s*>$/.test(openTag)) {
+      result += source.slice(lastIndex, tagEnd + 1);
+      lastIndex = tagEnd + 1;
+      openRegex.lastIndex = lastIndex;
+      continue;
+    }
+    const closeRegex = new RegExp(`</${tagName}\\s*>`, "gi");
+    closeRegex.lastIndex = tagEnd + 1;
+    const closeMatch = closeRegex.exec(source);
+    if (!closeMatch) {
+      result += source.slice(lastIndex, tagEnd + 1);
+      lastIndex = tagEnd + 1;
+      openRegex.lastIndex = lastIndex;
+      continue;
+    }
+    const contentStart = tagEnd + 1;
+    const contentEnd = closeMatch.index;
+    const closeTagEnd = contentEnd + closeMatch[0].length;
+    const content = source.slice(contentStart, contentEnd);
+    if (onInnerContent) {
+      onInnerContent(openTag, content, contentStart);
+    }
+    result += source.slice(lastIndex, contentStart) + maskPreservingNewlines(content) + source.slice(contentEnd, closeTagEnd);
+    lastIndex = closeTagEnd;
+    openRegex.lastIndex = lastIndex;
+  }
+  result += source.slice(lastIndex);
+  return result;
+}
 function extractAstroZones(source) {
   const lines = source.split("\n");
   let frontmatterStartLine = -1;
@@ -146,18 +210,16 @@ function extractAstroZones(source) {
   });
   let templateRaw = templateLines.join("\n");
   const scriptBlocks = [];
-  templateRaw = templateRaw.replace(
-    /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi,
-    (_full, openTag, content, closeTag) => {
-      return openTag + maskPreservingNewlines(content) + closeTag;
-    }
-  );
-  templateRaw = templateRaw.replace(
-    /(<script\b[^>]*>)([\s\S]*?)(<\/script>)/gi,
-    (fullMatch, openTag, content, closeTag, offset) => {
-      const isJsonScript = /\btype\s*=\s*["'](?:application\/(?:ld\+)?json|importmap)["']/i.test(openTag);
+  templateRaw = extractAndMaskPairedTag(templateRaw, "style");
+  templateRaw = extractAndMaskPairedTag(
+    templateRaw,
+    "script",
+    (openTag, content, contentOffset) => {
+      const isJsonScript = /\btype\s*=\s*["'](?:application\/(?:ld\+)?json|importmap|speculationrules)["']/i.test(
+        openTag
+      );
       if (!isJsonScript && content.trim().length > 0) {
-        const prefix = templateRaw.slice(0, offset + openTag.length);
+        const prefix = templateRaw.slice(0, contentOffset);
         const lineOffset = prefix.split("\n").length;
         const lastNewlineIdx = prefix.lastIndexOf("\n");
         const colOffset = lastNewlineIdx === -1 ? prefix.length : prefix.length - lastNewlineIdx - 1;
@@ -167,8 +229,6 @@ function extractAstroZones(source) {
           startLine: lineOffset
         });
       }
-      void fullMatch;
-      return openTag + maskPreservingNewlines(content) + closeTag;
     }
   );
   templateRaw = templateRaw.replace(/<!DOCTYPE[^>]*>/gi, (m) => maskPreservingNewlines(m));
@@ -1419,18 +1479,20 @@ var rule14 = {
         const column = node.loc.start.column;
         const component = detectComponent(node);
         if (isAstro) {
-          diagnostics.push({
-            ruleId: "img-not-optimized",
-            severity: "warning",
-            category: "performance",
-            confidence: 0.85,
-            message: "<img> tag used \u2014 use Astro <Image /> from astro:assets for automatic optimization",
-            component,
-            filePath,
-            line,
-            column,
-            codeSnippet: getCodeSnippet(sourceLines, line),
-            fix: `---
+          const isAstroFile = filePath.endsWith(".astro");
+          if (isAstroFile) {
+            diagnostics.push({
+              ruleId: "img-not-optimized",
+              severity: "warning",
+              category: "performance",
+              confidence: 0.85,
+              message: "<img> tag used \u2014 use Astro <Image /> from astro:assets for automatic optimization",
+              component,
+              filePath,
+              line,
+              column,
+              codeSnippet: getCodeSnippet(sourceLines, line),
+              fix: `---
 import { Image } from 'astro:assets';
 import myImage from '../assets/my-image.png';
 ---
@@ -1445,11 +1507,47 @@ import myImage from '../assets/my-image.png';
   width={800}
   height={600}
 />`,
-            suggestions: [
-              "Astro <Image /> from astro:assets optimizes formats (AVIF/WebP), resizes, and prevents CLS",
-              "Inside React (.tsx) islands, pass optimized image metadata from Astro frontmatter via getImage()"
-            ]
-          });
+              suggestions: [
+                "Astro <Image /> from astro:assets optimizes formats (AVIF/WebP), resizes, and prevents CLS",
+                "Inside React (.tsx) islands, pass optimized image metadata from Astro frontmatter via getImage()"
+              ]
+            });
+          } else {
+            diagnostics.push({
+              ruleId: "img-not-optimized",
+              severity: "warning",
+              category: "performance",
+              confidence: 0.85,
+              message: "<img> tag in Astro island \u2014 pre-optimize with getImage() from astro:assets in parent .astro file",
+              component,
+              filePath,
+              line,
+              column,
+              codeSnippet: getCodeSnippet(sourceLines, line),
+              fix: `// 1. In parent .astro frontmatter \u2014 optimize with getImage():
+---
+import { getImage } from 'astro:assets';
+import myImage from '../assets/my-image.png';
+import MyIsland from '../components/MyIsland';
+
+const optimizedImage = await getImage({ src: myImage, format: 'webp', width: 800, height: 600 });
+---
+<MyIsland imageSrc={optimizedImage.src} imageAttrs={optimizedImage.attributes} client:visible />
+
+// 2. Inside this .tsx/.jsx island component:
+<img
+  src={imageSrc}
+  {...imageAttrs}
+  alt="Descriptive alt text"
+  loading="lazy"
+  decoding="async"
+/>`,
+              suggestions: [
+                "Astro <Image /> cannot be imported directly inside client-side React (.tsx/.jsx) islands",
+                "Generate optimized AVIF/WebP URLs at build time via getImage() in .astro frontmatter and pass as props"
+              ]
+            });
+          }
         } else {
           diagnostics.push({
             ruleId: "img-not-optimized",
@@ -2342,13 +2440,54 @@ var rule25 = {
 var astro_client_load_overuse_default = rule25;
 
 // src/rules/astro-unsafe-set-html.ts
-function isStaticStringExpression(attr) {
+var SAFE_DATA_SCRIPT_TYPES = /* @__PURE__ */ new Set([
+  "application/ld+json",
+  "application/json",
+  "importmap",
+  "speculationrules"
+]);
+function isJsonStringifyExpression(expr) {
+  if (expr.type !== "CallExpression") return false;
+  const { callee } = expr;
+  if (callee.type === "MemberExpression" && callee.object.type === "Identifier" && callee.object.name === "JSON" && callee.property.type === "Identifier" && callee.property.name === "stringify") {
+    return true;
+  }
+  if (callee.type === "MemberExpression" && callee.property.type === "Identifier" && callee.property.name === "replace" && callee.object.type === "CallExpression") {
+    return isJsonStringifyExpression(callee.object);
+  }
+  return false;
+}
+function isSafeSetHtmlAttribute(attr, node) {
   if (!attr.value) return true;
   if (attr.value.type === "Literal" && typeof attr.value.value === "string") {
     return true;
   }
-  if (attr.value.type === "JSXExpressionContainer" && attr.value.expression.type === "Literal" && typeof attr.value.expression.value === "string") {
-    return true;
+  if (attr.value.type === "JSXExpressionContainer") {
+    const expr = attr.value.expression;
+    if (expr.type === "Literal" && typeof expr.value === "string") {
+      return true;
+    }
+    if (expr.type === "TemplateLiteral" && expr.expressions.length === 0) {
+      return true;
+    }
+    if (isJsonStringifyExpression(expr)) {
+      return true;
+    }
+  }
+  if (node.name.type === "JSXIdentifier" && node.name.name === "script") {
+    for (const a of node.attributes) {
+      if (a.type === "JSXAttribute" && a.name.type === "JSXIdentifier" && a.name.name === "type") {
+        let typeVal = null;
+        if (a.value?.type === "Literal" && typeof a.value.value === "string") {
+          typeVal = a.value.value.trim().toLowerCase();
+        } else if (a.value?.type === "JSXExpressionContainer" && a.value.expression.type === "Literal" && typeof a.value.expression.value === "string") {
+          typeVal = a.value.expression.value.trim().toLowerCase();
+        }
+        if (typeVal && SAFE_DATA_SCRIPT_TYPES.has(typeVal)) {
+          return true;
+        }
+      }
+    }
   }
   return false;
 }
@@ -2364,7 +2503,7 @@ var rule26 = {
       if (node.type !== "JSXOpeningElement") return;
       for (const attr of node.attributes) {
         if (attr.type === "JSXAttribute" && attr.name.type === "JSXNamespacedName" && attr.name.namespace.name === "set" && attr.name.name.name === "html") {
-          if (isStaticStringExpression(attr)) continue;
+          if (isSafeSetHtmlAttribute(attr, node)) continue;
           const line = attr.loc?.start.line ?? node.loc.start.line;
           const column = attr.loc?.start.column ?? node.loc.start.column;
           const component = detectComponent(node);
@@ -2401,14 +2540,42 @@ const safeHtml = sanitizeHtml(rawHtml);
 var astro_unsafe_set_html_default = rule26;
 
 // src/rules/astro-inline-script.ts
-function hasDefineVarsOrExternalSrc(attrs) {
+var JS_SCRIPT_TYPES = /* @__PURE__ */ new Set([
+  "",
+  "module",
+  "text/javascript",
+  "application/javascript",
+  "text/ecmascript",
+  "application/ecmascript",
+  "text/partytown"
+]);
+function getStringAttrValue(attr) {
+  if (!attr.value) return null;
+  if (attr.value.type === "Literal" && typeof attr.value.value === "string") {
+    return attr.value.value.trim().toLowerCase();
+  }
+  if (attr.value.type === "JSXExpressionContainer" && attr.value.expression.type === "Literal" && typeof attr.value.expression.value === "string") {
+    return attr.value.expression.value.trim().toLowerCase();
+  }
+  return null;
+}
+function isExemptInlineScript(attrs) {
   return attrs.some((a) => {
     if (a.type !== "JSXAttribute") return false;
     if (a.name.type === "JSXNamespacedName" && a.name.namespace.name === "define" && a.name.name.name === "vars") {
       return true;
     }
+    if (a.name.type === "JSXNamespacedName" && a.name.namespace.name === "set" && (a.name.name.name === "html" || a.name.name.name === "text")) {
+      return true;
+    }
     if (a.name.type === "JSXIdentifier" && a.name.name === "src") {
       return true;
+    }
+    if (a.name.type === "JSXIdentifier" && a.name.name === "type") {
+      const typeValue = getStringAttrValue(a);
+      if (typeValue !== null && !JS_SCRIPT_TYPES.has(typeValue)) {
+        return true;
+      }
     }
     return false;
   });
@@ -2424,7 +2591,7 @@ var rule27 = {
     traverse(ast, (node) => {
       if (node.type !== "JSXOpeningElement") return;
       if (node.name.type !== "JSXIdentifier" || node.name.name !== "script") return;
-      if (hasDefineVarsOrExternalSrc(node.attributes)) return;
+      if (isExemptInlineScript(node.attributes)) return;
       for (const attr of node.attributes) {
         if (attr.type === "JSXAttribute" && attr.name.type === "JSXNamespacedName" && attr.name.namespace.name === "is" && attr.name.name.name === "inline") {
           const line = attr.loc?.start.line ?? node.loc.start.line;

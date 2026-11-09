@@ -3,11 +3,38 @@ import { detectComponent, getCodeSnippet } from '../component-detector';
 import { traverse } from '../traverse';
 import type { Diagnostic, Rule } from './types';
 
-function hasDefineVarsOrExternalSrc(
+const JS_SCRIPT_TYPES = new Set([
+  '',
+  'module',
+  'text/javascript',
+  'application/javascript',
+  'text/ecmascript',
+  'application/ecmascript',
+  'text/partytown',
+]);
+
+function getStringAttrValue(attr: TSESTree.JSXAttribute): string | null {
+  if (!attr.value) return null;
+  if (attr.value.type === 'Literal' && typeof attr.value.value === 'string') {
+    return attr.value.value.trim().toLowerCase();
+  }
+  if (
+    attr.value.type === 'JSXExpressionContainer' &&
+    attr.value.expression.type === 'Literal' &&
+    typeof attr.value.expression.value === 'string'
+  ) {
+    return attr.value.expression.value.trim().toLowerCase();
+  }
+  return null;
+}
+
+function isExemptInlineScript(
   attrs: (TSESTree.JSXAttribute | TSESTree.JSXSpreadAttribute)[]
 ): boolean {
   return attrs.some((a) => {
     if (a.type !== 'JSXAttribute') return false;
+
+    // <script define:vars={{ ... }}> requires inline behavior in Astro
     if (
       a.name.type === 'JSXNamespacedName' &&
       a.name.namespace.name === 'define' &&
@@ -15,9 +42,29 @@ function hasDefineVarsOrExternalSrc(
     ) {
       return true;
     }
+
+    // <script is:inline set:html={...}> or set:text={...} requires is:inline in Astro (e.g. JSON-LD)
+    if (
+      a.name.type === 'JSXNamespacedName' &&
+      a.name.namespace.name === 'set' &&
+      (a.name.name.name === 'html' || a.name.name.name === 'text')
+    ) {
+      return true;
+    }
+
+    // External scripts <script is:inline src="..."> cannot be bundled locally
     if (a.name.type === 'JSXIdentifier' && a.name.name === 'src') {
       return true;
     }
+
+    // Non-JS data blocks such as type="application/ld+json", "application/json", "importmap"
+    if (a.name.type === 'JSXIdentifier' && a.name.name === 'type') {
+      const typeValue = getStringAttrValue(a);
+      if (typeValue !== null && !JS_SCRIPT_TYPES.has(typeValue)) {
+        return true;
+      }
+    }
+
     return false;
   });
 }
@@ -36,7 +83,7 @@ const rule: Rule = {
       if (node.type !== 'JSXOpeningElement') return;
       if (node.name.type !== 'JSXIdentifier' || node.name.name !== 'script') return;
 
-      if (hasDefineVarsOrExternalSrc(node.attributes)) return;
+      if (isExemptInlineScript(node.attributes)) return;
 
       for (const attr of node.attributes) {
         if (

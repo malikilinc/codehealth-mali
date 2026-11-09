@@ -90,6 +90,93 @@ function normalizeVoidTagsAndShorthands(template: string): string {
 }
 
 /**
+ * Masks inner content of paired `<script>...</script>` or `<style>...</style>` tags
+ * while properly skipping self-closing `<script ... />` tags and respecting `{...}` and quotes.
+ */
+function extractAndMaskPairedTag(
+  source: string,
+  tagName: 'script' | 'style',
+  onInnerContent?: (openTag: string, content: string, contentOffset: number) => void
+): string {
+  const openRegex = new RegExp(`<${tagName}\\b`, 'gi');
+  let result = '';
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = openRegex.exec(source)) !== null) {
+    const tagStart = match.index;
+    let i = tagStart + match[0].length;
+    let braceDepth = 0;
+    let quote: string | null = null;
+    let tagEnd = -1;
+
+    while (i < source.length) {
+      const ch = source[i];
+      if (quote) {
+        if (ch === '\\') {
+          i += 2;
+          continue;
+        }
+        if (ch === quote) quote = null;
+      } else {
+        if (ch === '"' || ch === "'" || ch === '`') {
+          quote = ch;
+        } else if (ch === '{') {
+          braceDepth++;
+        } else if (ch === '}') {
+          if (braceDepth > 0) braceDepth--;
+        } else if (ch === '>' && braceDepth === 0) {
+          tagEnd = i;
+          break;
+        }
+      }
+      i++;
+    }
+
+    if (tagEnd === -1) continue;
+
+    const openTag = source.slice(tagStart, tagEnd + 1);
+    // Self-closing <script ... /> or <style ... /> has no inner content or closing tag
+    if (/\/\s*>$/.test(openTag)) {
+      result += source.slice(lastIndex, tagEnd + 1);
+      lastIndex = tagEnd + 1;
+      openRegex.lastIndex = lastIndex;
+      continue;
+    }
+
+    const closeRegex = new RegExp(`</${tagName}\\s*>`, 'gi');
+    closeRegex.lastIndex = tagEnd + 1;
+    const closeMatch = closeRegex.exec(source);
+    if (!closeMatch) {
+      result += source.slice(lastIndex, tagEnd + 1);
+      lastIndex = tagEnd + 1;
+      openRegex.lastIndex = lastIndex;
+      continue;
+    }
+
+    const contentStart = tagEnd + 1;
+    const contentEnd = closeMatch.index;
+    const closeTagEnd = contentEnd + closeMatch[0].length;
+    const content = source.slice(contentStart, contentEnd);
+
+    if (onInnerContent) {
+      onInnerContent(openTag, content, contentStart);
+    }
+
+    result +=
+      source.slice(lastIndex, contentStart) +
+      maskPreservingNewlines(content) +
+      source.slice(contentEnd, closeTagEnd);
+
+    lastIndex = closeTagEnd;
+    openRegex.lastIndex = lastIndex;
+  }
+
+  result += source.slice(lastIndex);
+  return result;
+}
+
+/**
  * Splits an `.astro` file into:
  * 1) Frontmatter TypeScript zone (line-aligned)
  * 2) Client `<script>` TypeScript zones (line-aligned)
@@ -146,22 +233,20 @@ function extractAstroZones(source: string): AstroZones {
   const scriptBlocks: { source: string; startLine: number }[] = [];
 
   // Mask `<style ...>...</style>` inner content while keeping `<style ...></style>` tags
-  templateRaw = templateRaw.replace(
-    /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi,
-    (_full, openTag: string, content: string, closeTag: string) => {
-      return openTag + maskPreservingNewlines(content) + closeTag;
-    }
-  );
+  templateRaw = extractAndMaskPairedTag(templateRaw, 'style');
 
   // Extract `<script ...>...</script>` inner content for TS AST parsing, and mask inner content in template
-  templateRaw = templateRaw.replace(
-    /(<script\b[^>]*>)([\s\S]*?)(<\/script>)/gi,
-    (fullMatch, openTag: string, content: string, closeTag: string, offset: number) => {
+  templateRaw = extractAndMaskPairedTag(
+    templateRaw,
+    'script',
+    (openTag, content, contentOffset) => {
       const isJsonScript =
-        /\btype\s*=\s*["'](?:application\/(?:ld\+)?json|importmap)["']/i.test(openTag);
+        /\btype\s*=\s*["'](?:application\/(?:ld\+)?json|importmap|speculationrules)["']/i.test(
+          openTag
+        );
 
       if (!isJsonScript && content.trim().length > 0) {
-        const prefix = templateRaw.slice(0, offset + openTag.length);
+        const prefix = templateRaw.slice(0, contentOffset);
         const lineOffset = prefix.split('\n').length;
         const lastNewlineIdx = prefix.lastIndexOf('\n');
         const colOffset =
@@ -177,9 +262,6 @@ function extractAstroZones(source: string): AstroZones {
           startLine: lineOffset,
         });
       }
-
-      void fullMatch;
-      return openTag + maskPreservingNewlines(content) + closeTag;
     }
   );
 

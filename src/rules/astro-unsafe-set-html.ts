@@ -3,18 +3,86 @@ import { detectComponent, getCodeSnippet } from '../component-detector';
 import { traverse } from '../traverse';
 import type { Diagnostic, Rule } from './types';
 
-function isStaticStringExpression(attr: TSESTree.JSXAttribute): boolean {
+const SAFE_DATA_SCRIPT_TYPES = new Set([
+  'application/ld+json',
+  'application/json',
+  'importmap',
+  'speculationrules',
+]);
+
+function isJsonStringifyExpression(expr: TSESTree.Expression | TSESTree.JSXEmptyExpression): boolean {
+  if (expr.type !== 'CallExpression') return false;
+  const { callee } = expr;
+
+  if (
+    callee.type === 'MemberExpression' &&
+    callee.object.type === 'Identifier' &&
+    callee.object.name === 'JSON' &&
+    callee.property.type === 'Identifier' &&
+    callee.property.name === 'stringify'
+  ) {
+    return true;
+  }
+
+  // Also allow JSON.stringify(...).replace(...)
+  if (
+    callee.type === 'MemberExpression' &&
+    callee.property.type === 'Identifier' &&
+    callee.property.name === 'replace' &&
+    callee.object.type === 'CallExpression'
+  ) {
+    return isJsonStringifyExpression(callee.object);
+  }
+
+  return false;
+}
+
+function isSafeSetHtmlAttribute(
+  attr: TSESTree.JSXAttribute,
+  node: TSESTree.JSXOpeningElement
+): boolean {
   if (!attr.value) return true;
   if (attr.value.type === 'Literal' && typeof attr.value.value === 'string') {
     return true;
   }
-  if (
-    attr.value.type === 'JSXExpressionContainer' &&
-    attr.value.expression.type === 'Literal' &&
-    typeof attr.value.expression.value === 'string'
-  ) {
-    return true;
+  if (attr.value.type === 'JSXExpressionContainer') {
+    const expr = attr.value.expression;
+    if (expr.type === 'Literal' && typeof expr.value === 'string') {
+      return true;
+    }
+    if (expr.type === 'TemplateLiteral' && expr.expressions.length === 0) {
+      return true;
+    }
+    if (isJsonStringifyExpression(expr)) {
+      return true;
+    }
   }
+
+  // Exempt <script type="application/ld+json" set:html={...} />
+  if (node.name.type === 'JSXIdentifier' && node.name.name === 'script') {
+    for (const a of node.attributes) {
+      if (
+        a.type === 'JSXAttribute' &&
+        a.name.type === 'JSXIdentifier' &&
+        a.name.name === 'type'
+      ) {
+        let typeVal: string | null = null;
+        if (a.value?.type === 'Literal' && typeof a.value.value === 'string') {
+          typeVal = a.value.value.trim().toLowerCase();
+        } else if (
+          a.value?.type === 'JSXExpressionContainer' &&
+          a.value.expression.type === 'Literal' &&
+          typeof a.value.expression.value === 'string'
+        ) {
+          typeVal = a.value.expression.value.trim().toLowerCase();
+        }
+        if (typeVal && SAFE_DATA_SCRIPT_TYPES.has(typeVal)) {
+          return true;
+        }
+      }
+    }
+  }
+
   return false;
 }
 
@@ -38,7 +106,7 @@ const rule: Rule = {
           attr.name.namespace.name === 'set' &&
           attr.name.name.name === 'html'
         ) {
-          if (isStaticStringExpression(attr)) continue;
+          if (isSafeSetHtmlAttribute(attr, node)) continue;
 
           const line = attr.loc?.start.line ?? node.loc!.start.line;
           const column = attr.loc?.start.column ?? node.loc!.start.column;
